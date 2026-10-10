@@ -35,6 +35,10 @@ class Config:
     bg_speed: float = 1.0
     particles: int = 22
     blooms: int = 2
+    card_glow: bool = True       # hazy accent rhythm breathing inside each card
+    bg_image: str = ""           # custom backdrop image; "" = built-in gradient
+    bg_image_blur: float = 8.0   # Gaussian blur radius applied to that image, px
+    bg_image_brightness: float = 1.0
 
     # ---- look --------------------------------------------------------------
     brightness: float = 1.0

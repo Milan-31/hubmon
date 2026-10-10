@@ -48,53 +48,12 @@ def _presentmon_path(explicit: str = ""):
     return None
 
 
-# CPU temperature. Windows exposes no per-core sensor to plain user code, so we
-# try the hardware-monitor WMI providers first (they read the CPU's MSRs through
-# a kernel driver) and fall back to the ACPI thermal zone, which is a mainboard
-# reading rather than the die. Both move slowly, so poll rarely.
-CPU_TEMP_TTL = 10.0
-NET_PERIOD = 1.0
-
-# LibreHardwareMonitor / OpenHardwareMonitor expose the same Sensor schema.
-_TEMP_PROBE = r"""
-$o = $null
-foreach ($ns in 'root/LibreHardwareMonitor','root/OpenHardwareMonitor') {
-  try {
-    $s = Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Stop |
-      Where-Object { $_.SensorType -eq 'Temperature' -and $_.Name -match 'CPU|Core|Package' } |
-      Sort-Object Value -Descending | Select-Object -First 1
-    if ($s) { $o = $ns + ':' + [math]::Round($s.Value, 1); break }
-  } catch {}
-}
-if (-not $o) {
-  $t = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue |
-    Select-Object -First 1 -ExpandProperty CurrentTemperature
-  if ($t) { $o = 'ACPI:' + [math]::Round(($t / 10.0 - 273.15), 1) }
-}
-if ($o) { $o }
-"""
-
-
-def _read_cpu_temp():
-    """(celsius, source) or (None, None) if nothing answered."""
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             _TEMP_PROBE],
-            capture_output=True, text=True, timeout=10,
-            creationflags=CREATE_NO_WINDOW)
-        lines = [ln.strip() for ln in out.stdout.strip().splitlines() if ln.strip()]
-        if not lines:
-            return None, None
-        src, _, val = lines[-1].rpartition(":")
-        return float(val), (src or "?")
-    except Exception:
-        return None, None
-
 # i5-12400F-class defaults, overridden by the detected nominal clock where possible.
 CPU_IDLE_W = 12.0
 CPU_LOAD_W = 92.0     # extra watts at 100 % utilisation
 BASE_SYSTEM_W = 38.0  # board + RAM + SSD + fans + hub itself (rough)
+
+NET_PERIOD = 1.0
 
 
 class _PdhCounter:
@@ -298,17 +257,14 @@ class Sensors:
         self._net_t = 0.0
         self._net_down = 0.0
         self._net_up = 0.0
-        self._temp = 0.0
-        self._temp_src = ""
+        self._cores = psutil.cpu_count(logical=False) or 0
+        self._threads = psutil.cpu_count(logical=True) or 0
         psutil.cpu_percent(interval=None)
         self._thread = threading.Thread(target=self._run, daemon=True, name="hubmon-sens")
-        self._temp_thread = threading.Thread(target=self._temp_loop, daemon=True,
-                                             name="hubmon-temp")
 
     def start(self):
         self._fg.start()
         self._thread.start()
-        self._temp_thread.start()
 
     def stop(self):
         self._stop = True
@@ -316,19 +272,6 @@ class Sensors:
 
     def snapshot(self):
         return self.data
-
-    def _temp_loop(self):
-        """Poll the CPU temperature on its own thread: the WMI probe takes a
-        few hundred ms and must not stall the main sampler."""
-        while not self._stop:
-            t, src = _read_cpu_temp()
-            if t is not None:
-                self._temp = t
-                self._temp_src = src
-            slept = 0.0
-            while slept < CPU_TEMP_TTL and not self._stop:
-                time.sleep(0.1)
-                slept += 0.1
 
     # ------------------------------------------------------------------ loop
     def _run(self):
@@ -372,8 +315,8 @@ class Sensors:
                 "cpu_freq_mhz": freq_mhz,
                 "cpu_perf": perf or 0.0,
                 "cpu_power_w": cpu_power,
-                "cpu_temp_c": self._temp,
-                "cpu_temp_src": self._temp_src,
+                "cpu_cores": self._cores,
+                "cpu_threads": self._threads,
                 "net_down_bps": self._net_down,
                 "net_up_bps": self._net_up,
                 "mem_percent": vm.percent,

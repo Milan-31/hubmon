@@ -21,7 +21,7 @@ import numpy as np
 import psutil
 
 from . import config, transport, webui
-from .render import Dashboard, H, W
+from .render import Dashboard, H, W, core_label
 from .sensors import Sensors
 
 VENDOR_NAMES = ("佳点V1PRO控制工具", "usb_send_gif")
@@ -82,7 +82,7 @@ class Demo:
             cpu_freq_mhz=2500 + 17 * cpu, gpu_freq_mhz=1500 + 20 * gpu,
             total_power_w=70 + 0.6 * cpu + 0.9 * gpu, cpu_power_w=12 + 0.55 * cpu,
             gpu_power_w=0.9 * gpu, gpu_temp_c=48 + 0.25 * gpu,
-            cpu_temp_c=38 + 0.18 * cpu,
+            cpu_cores=6, cpu_threads=12,
             net_down_bps=abs(3.2e6 * math.sin(t * 0.8)) + 8e4,
             net_up_bps=abs(4.2e5 * math.sin(t * 1.3)) + 2e4,
             mem_used_gb=16.4, mem_total_gb=34.2, cpu_perf=100 + 0.9 * cpu,
@@ -120,7 +120,7 @@ def run_stream(cfg, demo=False, log_every=5.0):
         d.update(cpu=round(v.cpu, 1), gpu=round(v.gpu, 1), mem=round(v.mem, 1),
                  freq_cpu=round(v.freq_cpu), freq_gpu=round(v.freq_gpu),
                  temp_gpu=round(v.temp_gpu), power=round(v.power),
-                 temp_cpu=round(v.temp_cpu), cpu_temp_src=v.cpu_temp_src,
+                 cores=core_label(v.cpu_cores, v.cpu_threads),
                  net_down=round(v.net_down), net_up=round(v.net_up),
                  cpu_power=round(v.cpu_power), gpu_power=round(v.gpu_power),
                  fg_app=v.fg_app, fg_fps=round(v.fg_fps, 1), host=v.host)

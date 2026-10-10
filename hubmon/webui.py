@@ -88,6 +88,12 @@ SCHEMA = [
              "min": 0, "max": 80, "step": 1, "unit": "个"},
             {"key": "blooms", "label": "光晕数量", "type": "num",
              "min": 0, "max": 8, "step": 1, "unit": "个"},
+            {"key": "card_glow", "label": "卡片底色律动", "type": "bool"},
+            {"key": "bg_image", "label": "背景图片", "type": "text"},
+            {"key": "bg_image_blur", "label": "图片模糊", "type": "num",
+             "min": 0, "max": 40, "step": 1, "unit": "px"},
+            {"key": "bg_image_brightness", "label": "图片亮度", "type": "num",
+             "min": 0, "max": 2, "step": 0.05, "unit": "×"},
         ],
     },
     {

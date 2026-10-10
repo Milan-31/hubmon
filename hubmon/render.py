@@ -19,12 +19,14 @@ Design notes
 from __future__ import annotations
 
 import math
+import os
 import re
 import time
 from dataclasses import dataclass
 
 import numpy as np
-from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+from PIL import (Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter,
+                 ImageFont, ImageOps)
 
 W, H = 320, 170
 
@@ -57,12 +59,27 @@ BAR_OMEGA = 3.4
 # "Pool" load meter: a card fills with liquid up to its load percentage. The
 # ripple is stepped at a low rate on purpose -- every moved pixel costs USB
 # bandwidth, and a slow slosh reads as water just as convincingly as a fast one.
-WATER_AMP = 1.7        # px of surface ripple
-WATER_LAM = 74.0       # px per ripple
+WATER_AMP = 1.7        # px of travelling swell
+WATER_BOB = 0.8        # px the whole level rises and settles on a slow beat
+WATER_TILT = 2.2       # px the surface tips by at full slosh
+WATER_SLOSH = 0.12     # tilt per px/s the level moves
+WATER_SETTLE = 0.45    # how quickly the tilt follows the level
+WATER_LAM = 74.0       # px per swell
 WATER_HZ = 9.0         # ripple steps per second
 WATER_STEP = 0.30      # radians advanced per step
+WATER_RISE = 1.1       # bob steps per second
 CARD_RADIUS = 16
 CARD_GLOW = 0.34       # backdrop glow that may leak into a card interior
+
+# Card "base rhythm": a hazy accent wash that breathes inside each card, under
+# the liquid. It is stepped one card at a time -- a wash morphing across every
+# card at once would dirty a whole card's worth of tiles on a single frame and
+# stall the link, so the per-step patch is kept to exactly one card.
+CARD_PULSE_HZ = 4.0    # wash steps per second (one card per step)
+CARD_PULSE_SPAN = 6.0  # seconds for one breath
+CARD_PULSE_R = 0.60    # glow radius, as a fraction of the card's short side
+CARD_PULSE_MIN = 0.05  # faintest wash
+CARD_PULSE_MAX = 0.14  # strongest wash
 
 
 def _font(names, size):
@@ -132,6 +149,16 @@ def rate(bps):
     if bps >= 1024.0:
         return f"{bps / 1024.0:.0f}K"
     return f"{bps:.0f}B"
+
+
+def core_label(cores, threads):
+    """Compact core/thread label: 6C·12T, 12T, or a dash when unknown."""
+    cores, threads = int(cores or 0), int(threads or 0)
+    if cores and threads and threads != cores:
+        return f"{cores}C·{threads}T"
+    if threads:
+        return f"{threads}T"
+    return "—"
 
 
 # ------------------------------------------------------------ part naming ----
@@ -289,10 +316,15 @@ def _mask(r):
 
 
 def glow(img, x, y, r, color, strength):
-    """Paste a soft radial halo of ``color`` centred on (x, y)."""
+    """Paste a soft radial halo of ``color`` centred on (x, y).
+
+    ``strength`` is the alpha in 0..255 at the halo's centre; it tapers to zero
+    at the rim.
+    """
     if r <= 0 or strength <= 1:
         return
-    m = Image.fromarray((_mask(r) * (strength / 255.0)).astype(np.uint8), "L")
+    m = Image.fromarray(
+        np.clip(_mask(r) * strength, 0.0, 255.0).astype(np.uint8), "L")
     blob = Image.new("RGBA", (2 * r + 1, 2 * r + 1), tuple(color) + (255,))
     img.paste(blob, (int(x) - r, int(y) - r), m)
 
@@ -382,8 +414,8 @@ class Vals:
     cpu_power: float = 0.0
     gpu_power: float = 0.0
     temp_gpu: float = 0.0
-    temp_cpu: float = 0.0
-    cpu_temp_src: str = ""
+    cpu_cores: int = 0
+    cpu_threads: int = 0
     net_down: float = 0.0
     net_up: float = 0.0
     mem_used: float = 0.0
@@ -428,8 +460,19 @@ class Dashboard:
         self._mmask = None
         self._sig = None
         self._masks = {}
+        self._pmasks = {}
         self._cpu_short = ""
         self._gpu_short = ""
+        # liquid flow: last level seen per card, and the tilt it left behind
+        self._lvl = {}
+        self._tilt = {}
+        self._tick = -1
+        self._cores = "—"
+        # card base rhythm: per-card phase, advanced one card per step
+        self._pulse = {}
+        self._pulse_tick = -1
+        self._bg_key = None
+        self._bg_img = None
         self.motion = Motion(self.cfg)
 
         # RGB565 softens thin strokes, so nothing is drawn in a regular weight
@@ -466,6 +509,8 @@ class Dashboard:
         return (c.accent_cpu, c.accent_gpu, c.accent_mem, c.accent_pwr,
                 round(c.brightness, 3), round(c.bg_brightness, 3),
                 round(c.saturation, 3), round(c.glass, 3),
+                c.bg_image, round(c.bg_image_blur, 2),
+                round(c.bg_image_brightness, 2),
                 c.show_mem, c.show_power, c.show_fps)
 
     def apply_config(self, cfg, force=False):
@@ -499,6 +544,12 @@ class Dashboard:
             for i, k in enumerate(keys):
                 self.cards[k] = Geo(8 + i * (cw + 5), 106, cw, 58)
         self._masks = {}          # geometry changed -> card masks must be rebuilt
+        self._pmasks = {}
+        # stagger each card's breath so the base rhythm is not one synchronised
+        # flash across the whole panel
+        n = max(1, len(self.cards))
+        self._pulse = {k: i * (CARD_PULSE_SPAN / n)
+                       for i, k in enumerate(self.cards)}
 
     # -- target values come from the sensor layer --------------------------
     def update(self, stats):
@@ -512,8 +563,8 @@ class Dashboard:
         t.cpu_power = stats.get("cpu_power_w", 0.0)
         t.gpu_power = stats.get("gpu_power_w", 0.0)
         t.temp_gpu = stats.get("gpu_temp_c", 0.0)
-        t.temp_cpu = stats.get("cpu_temp_c", 0.0)
-        t.cpu_temp_src = stats.get("cpu_temp_src", "")
+        t.cpu_cores = stats.get("cpu_cores", 0)
+        t.cpu_threads = stats.get("cpu_threads", 0)
         t.net_down = stats.get("net_down_bps", 0.0)
         t.net_up = stats.get("net_up_bps", 0.0)
         t.mem_used = stats.get("mem_used_gb", 0.0)
@@ -526,12 +577,42 @@ class Dashboard:
         t.host = stats.get("host", "")
 
     # ---------------------------------------------------------------- static
+    def _load_bg_image(self, path):
+        """Cover-fit a user image to the panel and bake in blur + brightness."""
+        path = (path or "").strip().strip('"')
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            src = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+            src = ImageOps.fit(src, (W, H), method=Image.LANCZOS)
+            blur = max(0.0, float(self.cfg.bg_image_blur))
+            if blur:
+                src = src.filter(ImageFilter.GaussianBlur(blur))
+            return ImageEnhance.Brightness(src).enhance(
+                max(0.0, float(self.cfg.bg_image_brightness)))
+        except Exception:
+            return None
+
     def _background(self):
+        key = (self.cfg.bg_image, round(self.cfg.bg_image_blur, 2),
+               round(self.cfg.bg_image_brightness, 2))
+        if key != self._bg_key:
+            self._bg_key = key
+            self._bg_img = self._load_bg_image(self.cfg.bg_image)
+
+        yy, xx = np.mgrid[0:H, 0:W]
+        r = np.sqrt(((xx - W / 2) / (W / 2)) ** 2 + ((yy - H / 2) / (H / 2)) ** 2)
+        if self._bg_img is not None:
+            # a user photo replaces the procedural gradient; a light vignette is
+            # kept so the cards still read against a bright image
+            px = np.asarray(self._bg_img, np.float32)
+            px *= np.clip(1.06 - 0.18 * r, 0, 1.2)[:, :, None]
+            return Image.fromarray(np.clip(px, 0, 255).astype(np.uint8), "RGB")
+
         ys = np.linspace(0, 1, H)[:, None, None]
         px = np.empty((H, W, 3), np.float32)
         px[:] = (np.array(BG_TOP, np.float32) * (1 - ys)
                  + np.array(BG_BOTTOM, np.float32) * ys)
-        yy, xx = np.mgrid[0:H, 0:W]
         for (gx, gy, gr, col, amt) in (
             (26, 26, 78, ACCENT_CYAN, 0.62),
             (296, 26, 78, ACCENT_VIOLET, 0.58),
@@ -541,7 +622,6 @@ class Dashboard:
         ):
             d = np.sqrt((xx - gx) ** 2 + (yy - gy) ** 2)
             px += (np.clip(1 - d / gr, 0, 1) ** 2 * amt)[:, :, None] * np.array(col, np.float32)
-        r = np.sqrt(((xx - W / 2) / (W / 2)) ** 2 + ((yy - H / 2) / (H / 2)) ** 2)
         px *= np.clip(1.04 - 0.10 * r, 0, 1.2)[:, :, None]
         px += np.random.default_rng(7).normal(0.0, 3.0, (H, W, 1)).astype(np.float32)
         px += (((xx % 16 == 0) | (yy % 16 == 0)).astype(np.float32) * 4.0)[:, :, None]
@@ -551,18 +631,36 @@ class Dashboard:
         col = np.linspace(top_a, bot_a, H).astype(np.uint8)[:, None]
         return Image.fromarray(np.repeat(col, W, axis=1), "L")
 
+    # the panel rounds nothing off -- a 1-px rounded rectangle drawn natively
+    # lands on a hard staircase. Both card shapes are drawn at 4x and reduced,
+    # which buys the edge a fraction-of-a-pixel falloff for free.
+    MASK_SS = 4
+
     def _round_mask(self, g: Geo, radius, inset=0):
-        m = Image.new("L", (W, H), 0)
+        s = self.MASK_SS
+        m = Image.new("L", (W * s, H * s), 0)
         ImageDraw.Draw(m).rounded_rectangle(
-            (g.x + inset, g.y + inset, g.x + g.w - inset, g.y + g.h - inset),
-            max(1, radius - inset), fill=255)
+            ((g.x + inset) * s, (g.y + inset) * s,
+             (g.x + g.w - inset) * s, (g.y + g.h - inset) * s),
+            max(1, radius - inset) * s, fill=255)
+        return m.resize((W, H), Image.LANCZOS)
+
+    def _card_pmask(self, key, g: Geo):
+        """Cached full-size card mask, for the per-frame base rhythm."""
+        m = self._pmasks.get(key)
+        if m is None:
+            m = self._round_mask(g, CARD_RADIUS)
+            self._pmasks[key] = m
         return m
 
     def _edge_layer(self, g: Geo, radius, inset, top_a, bot_a):
-        ring = Image.new("L", (W, H), 0)
+        s = self.MASK_SS
+        ring = Image.new("L", (W * s, H * s), 0)
         ImageDraw.Draw(ring).rounded_rectangle(
-            (g.x + inset, g.y + inset, g.x + g.w - inset, g.y + g.h - inset),
-            max(1, radius - inset), outline=255, width=1)
+            ((g.x + inset) * s, (g.y + inset) * s,
+             (g.x + g.w - inset) * s, (g.y + g.h - inset) * s),
+            max(1, radius - inset) * s, outline=255, width=s)
+        ring = ring.resize((W, H), Image.LANCZOS)
         layer = Image.new("RGBA", (W, H), (255, 255, 255, 0))
         layer.putalpha(ImageChops.multiply(ring, self._vgrad(top_a, bot_a)))
         return layer
@@ -652,8 +750,32 @@ class Dashboard:
             self._masks[key] = m
         return m
 
+    def _card_pulse(self, img, key, g: Geo, theme, seed):
+        """A hazy accent wash drifting inside the card, beneath the liquid.
+
+        Reads as the card's base colour breathing. The wash is driven by a
+        per-card phase that only advances one card at a time (see ``step``), so
+        a single frame never has to repaint more than one card's worth of tiles.
+        """
+        t = self._pulse.get(key)
+        if t is None:
+            return
+        cyc = 2.0 * math.pi / CARD_PULSE_SPAN
+        r = max(12, int(CARD_PULSE_R * min(g.w, g.h)))
+        cx = g.x + g.w * (0.5 + 0.20 * math.sin(t * cyc + seed))
+        cy = g.y + g.h * (0.60 + 0.16 * math.cos(t * cyc * 0.8 + seed * 1.6))
+        amp = CARD_PULSE_MIN + (CARD_PULSE_MAX - CARD_PULSE_MIN) * (
+            0.5 + 0.5 * math.sin(t * cyc + seed * 2.0))
+        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        glow(layer, cx, cy, r, theme, amp * 255.0)
+        # clip the wash to the (anti-aliased) card outline so it never bleeds
+        # past the rounded edge
+        layer.putalpha(ImageChops.multiply(layer.getchannel("A"),
+                                           self._card_pmask(key, g)))
+        img.paste(layer, (0, 0), layer)
+
     def _water(self, img, key, g: Geo, pct, theme):
-        """Fill card ``g`` with liquid up to ``pct``%, returning the surface y.
+        """Fill card ``g`` with liquid up to ``pct``%.
 
         The waterline is anti-aliased: a pixel's water coverage is the fraction
         of its square that falls below the surface, so the wave reads as a
@@ -661,13 +783,17 @@ class Dashboard:
         320 px panel. The crest is a separate soft highlight laid over the top
         of the body, which keeps the surface readable at a glance.
 
-        Every term is a function of the *card* row, never of the depth below the
-        surface. If the shading moved with the surface, one level step would
-        repaint the whole pool instead of the band at its edge.
+        Three motions say "liquid" rather than "filled rectangle": a swell that
+        travels along the card, a slow beat the whole level rides, and a tilt
+        that lags the level so the pool tips while it fills and settles after.
+
+        Every term is a function of the *card* row or a stepped clock, never of
+        the depth below the surface. If the shading moved with the surface, one
+        level step would repaint the whole pool instead of the band at its edge.
         """
         pct = max(0.0, min(100.0, pct))
         if pct <= 0.35:
-            return None
+            return
         h, w = g.h, g.w
         span = max(1.0, (h - 1.0) - 1.0)
         # Quantise the level: an unchanged pool must produce identical pixels,
@@ -677,11 +803,15 @@ class Dashboard:
         yy = np.arange(h, dtype=np.float32)[:, None]
         xx = np.arange(w, dtype=np.float32)[None, :]
         ph = (int(self.time * WATER_HZ) % 4000) * WATER_STEP
-        # two long swells rather than a long one plus a short one: a wavelength
-        # close to the pixel grid is what makes a wavy edge look jagged
-        surf = sy + WATER_AMP * (0.70 * np.sin(xx / WATER_LAM * 6.283 + ph)
-                                 + 0.30 * np.sin(xx / (WATER_LAM * 0.47) * 6.283
-                                                 - ph * 1.7))
+        lam2 = WATER_LAM * 0.52
+        # one swell with a shorter one riding it: both travel the same way, so
+        # the surface reads as flowing, at different speeds so it does not slide
+        # along as a rigid shape
+        ripple = (0.72 * np.sin(xx / WATER_LAM * 6.283 + ph)
+                  + 0.28 * np.sin(xx / lam2 * 6.283 + ph * 1.55))
+        bob = WATER_BOB * math.sin(int(self.time * WATER_RISE) * 0.75)
+        tilt = self._tilt.get(key, 0.0) * (xx / max(1.0, w - 1.0) * 2.0 - 1.0)
+        surf = sy + bob + tilt + WATER_AMP * ripple
         depth = yy - surf                      # >= 0 below the waterline
 
         # coverage of row yy by water, ramped over one pixel -> edge AA
@@ -689,8 +819,10 @@ class Dashboard:
         grad = yy / float(h - 1)               # 0 at card top, 1 at card bottom
         a_body = (232.0 - 96.0 * grad) * cov / 255.0
         # the crest hugs the waterline and fades into the body, so it needs no
-        # hard band of its own
-        a_rim = 0.92 * cov * np.clip(1.0 - depth / 1.7, 0.0, 1.0)
+        # hard band of its own; brightening it over the short swell reads as
+        # light catching moving water
+        glint = 0.80 + 0.14 * np.sin(xx / lam2 * 6.283 + ph * 1.55 + 0.9)
+        a_rim = glint * cov * np.clip(1.0 - depth / 1.7, 0.0, 1.0)
 
         a = a_rim + a_body * (1.0 - a_rim)
         # the body stays darker than the accent and deepens downwards: a light
@@ -708,7 +840,6 @@ class Dashboard:
         img.paste(Image.fromarray(
             np.clip(sub * (1.0 - a) + col * a, 0, 255).astype(np.uint8), "RGB"),
             (g.x, g.y))
-        return g.y + float(surf[0, max(0, w - PAD - 1)])
 
     # ------------------------------------------------------------- animation
     def step(self, dt):
@@ -717,8 +848,7 @@ class Dashboard:
         self.motion.step(dt, c.bg_speed if c.bg_motion else 0.0)
         k = 1 - math.exp(-dt * 4.0)
         for f in ("cpu", "gpu", "mem", "freq_cpu", "freq_gpu", "power", "cpu_power",
-                  "gpu_power", "temp_gpu", "temp_cpu", "mem_used", "mem_total",
-                  "cpu_perf"):
+                  "gpu_power", "temp_gpu", "mem_used", "mem_total", "cpu_perf"):
             setattr(self.v, f, lerp(getattr(self.v, f), getattr(self.tgt, f), k))
         # byte rates: the sampler refreshes them once a second, so copy straight
         # through -- the top bar then updates on that same 1 Hz cadence
@@ -729,7 +859,8 @@ class Dashboard:
         self.v.gpu_name = self.tgt.gpu_name
         self.v.fg_app = self.tgt.fg_app
         self.v.host = self.tgt.host
-        self.v.cpu_temp_src = self.tgt.cpu_temp_src
+        self.v.cpu_cores = self.tgt.cpu_cores
+        self.v.cpu_threads = self.tgt.cpu_threads
 
         # load meters: re-read the target on a slow cadence, then let a
         # critically damped spring glide the tip there (critically damped =
@@ -748,6 +879,36 @@ class Dashboard:
             pos += vel * h
             self._bar_v[key] = vel
             self.bar[key] = max(0.0, min(100.0, pos))
+
+        # water has inertia: while a level is moving the surface tips towards the
+        # far side, and once it stops the tilt decays away instead of snapping.
+        # Sampled on the ripple's own clock, so the pool only changes WATER_HZ
+        # times a second: one moved band per step is affordable, a shift on
+        # every frame would re-send a band of tiles on every frame.
+        tick = int(self.time * WATER_HZ)
+        if tick != self._tick:
+            self._tick = tick
+            for key, pct in (("cpu", self.bar["cpu"]), ("gpu", self.bar["gpu"]),
+                             ("mem", self.v.mem)):
+                prev = self._lvl.get(key, pct)
+                self._lvl[key] = pct
+                want = (pct - prev) * WATER_HZ * WATER_SLOSH
+                self._tilt[key] = lerp(self._tilt.get(key, 0.0),
+                                       max(-WATER_TILT, min(WATER_TILT, want)),
+                                       WATER_SETTLE)
+
+        # card base rhythm: advance exactly *one* card's phase per step. Every
+        # card is still drawn each frame, but only one of them differs from the
+        # previous frame, so the transport only has to ship one card's tiles.
+        if c.card_glow:
+            tick = int(self.time * CARD_PULSE_HZ)
+            if tick != self._pulse_tick:
+                self._pulse_tick = tick
+                keys = list(self.cards)
+                if keys:
+                    k = keys[tick % len(keys)]
+                    self._pulse[k] = self._pulse.get(k, 0.0) + (
+                        len(keys) / CARD_PULSE_HZ)
 
         self._text_acc += dt
         if self._text_acc >= c.text_period:
@@ -776,6 +937,7 @@ class Dashboard:
         self.num_pwr.set(f"{v.power:.0f}")
         self._cpu_short = short_cpu(v.cpu_name)
         self._gpu_short = short_gpu(v.gpu_name)
+        self._cores = core_label(v.cpu_cores, v.cpu_threads)
 
     # ---------------------------------------------------------------- render
     def render(self, dt):
@@ -798,18 +960,25 @@ class Dashboard:
 
         d = ImageDraw.Draw(img, "RGBA")
 
-        # the pools fill first; every readout is then drawn on top of them
         mem_col = hex_rgb(c.accent_mem, ACCENT_CYAN)
-        glints = []
+        # the hazy base rhythm sits under the liquid, so the pool reads as a
+        # body of water with light moving through its backdrop
+        if c.card_glow:
+            for i, (key, theme) in enumerate((("cpu", cpu_col), ("gpu", gpu_col),
+                                              ("mem", mem_col),
+                                              ("power", pwr_col),
+                                              ("fps", ACCENT_GREEN))):
+                g = self.cards.get(key)
+                if g is not None:
+                    self._card_pulse(img, key, g, theme, i * 1.7)
+
+        # the pools fill next; every readout is then drawn on top of them
         for key, pct, theme in (("cpu", self.bar["cpu"], cpu_col),
                                 ("gpu", self.bar["gpu"], gpu_col),
                                 ("mem", self.v.mem, mem_col)):
             g = self.cards.get(key)
-            if g is None:
-                continue
-            sy = self._water(img, key, g, pct, theme)
-            if sy is not None:
-                glints.append((g, sy))
+            if g is not None:
+                self._water(img, key, g, pct, theme)
 
         for key, pct in (("cpu", self.v.cpu), ("gpu", self.v.gpu)):
             if pct > 80:
@@ -822,10 +991,11 @@ class Dashboard:
         self._labels(d)
         self._big_card(d, img, self.cards["cpu"], self.num_cpu, self.num_fc,
                        "GHz", f"~{self.v.cpu_power:.0f} W", TEXT_DIM, self._cpu_short)
-        self._temp_chip(d, self.cards["cpu"], "CPU", self.v.temp_cpu)
+        self._chip(d, self.cards["cpu"], "CPU", self._cores, TEXT_DIM)
         self._big_card(d, img, self.cards["gpu"], self.num_gpu, self.num_fg,
                        "MHz", f"~{self.v.gpu_power:.0f} W", TEXT_DIM, self._gpu_short)
-        self._temp_chip(d, self.cards["gpu"], "GPU", self.v.temp_gpu)
+        self._chip(d, self.cards["gpu"], "GPU",
+                   f"{self.v.temp_gpu:.0f}°C", ramp(TEMPERATURE_STOPS, self.v.temp_gpu))
 
         if "mem" in self.cards:
             g = self.cards["mem"]
@@ -848,11 +1018,6 @@ class Dashboard:
             app = fit(self.v.fg_app or "—", self._f_app, g.w - PAD * 2)
             d.text((g.x + PAD, g.y + 41), app, font=self._f_app, fill=TEXT_DIM,
                    stroke_width=1, stroke_fill=TEXT_SHADOW)
-
-        # the single white pixel that used to cap the meter now rides each pool
-        for g, sy in glints:
-            d.point((int(g.x + g.w - PAD), int(round(sy))),
-                    fill=(255, 255, 255, 255))
 
         d.text((TOP_BAR.x + 2, TOP_BAR.y + 2), self.v.host or "PC", font=self._f_host,
                fill=TEXT)
@@ -887,11 +1052,10 @@ class Dashboard:
 
         return img
 
-    def _temp_chip(self, d, g: Geo, label, temp):
-        """Instant temperature, sitting just right of the card's label."""
+    def _chip(self, d, g: Geo, label, text, col):
+        """Small readout sitting just right of the card's label."""
         x = g.x + PAD + self._f_lbl.getlength(label) + 5
-        d.text((x, g.y + 5), f"{temp:.0f}°C", font=self._f_lbl,
-               fill=ramp(TEMPERATURE_STOPS, temp),
+        d.text((x, g.y + 5), text, font=self._f_lbl, fill=col,
                stroke_width=1, stroke_fill=TEXT_SHADOW)
 
     def _big_card(self, d, img, g: Geo, num_pct, freq_num, unit, rhs, rhs_col, spec):
@@ -908,8 +1072,8 @@ class Dashboard:
         d.text((g.x + g.w - PAD - self._f_sub.getlength(rhs), g.y + 34), rhs,
                font=self._f_sub, fill=rhs_col,
                stroke_width=1, stroke_fill=TEXT_SHADOW)
-        # part name, under the readout and above the pool
-        d.text((g.x + PAD, g.y + g.h - 21),
+        # part name, tucked in directly under the readout and above the pool
+        d.text((g.x + PAD, g.y + 50),
                fit(spec or "—", self._f_spec, g.w - PAD * 2),
                font=self._f_spec, fill=TEXT_DIM,
                stroke_width=1, stroke_fill=TEXT_SHADOW)
