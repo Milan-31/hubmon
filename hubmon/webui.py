@@ -152,7 +152,7 @@ _PAGE = r"""<!DOCTYPE html>
   html,body{margin:0;padding:0}
   body{
     font-family:var(--font); color:var(--text); background:var(--bg);
-    min-height:100vh; padding:26px 18px 108px;
+    min-height:100vh; padding:0 18px 108px;
     font-size:15px; line-height:1.45;
     -webkit-font-smoothing:antialiased;
     font-variant-numeric:tabular-nums;
@@ -169,7 +169,14 @@ _PAGE = r"""<!DOCTYPE html>
   .anim{animation:rise .5s cubic-bezier(.22,.7,.25,1) both}
 
   /* ---- top bar ---- */
-  .top{display:flex;align-items:center;gap:14px;margin-bottom:22px}
+  .top{
+    position:sticky; top:0; z-index:15;
+    display:flex;align-items:center;gap:14px;
+    padding:18px 0 13px; margin-bottom:18px;
+    background:rgba(11,15,23,.86);
+    backdrop-filter:saturate(140%) blur(16px);
+    border-bottom:1px solid var(--sep);
+  }
   .brand{display:flex;align-items:center;gap:13px;min-width:0}
   .brand-icon{
     width:44px;height:44px;flex:0 0 auto;border-radius:14px;
@@ -336,7 +343,7 @@ _PAGE = r"""<!DOCTYPE html>
   #toast.show{opacity:1;transform:translate(-50%,0)}
 
   @media (max-width:560px){
-    body{padding:20px 13px 100px}
+    body{padding:0 13px 100px}
     .brand h1{font-size:18px}
     .stat-num{font-size:23px}
     .stats{grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:10px}

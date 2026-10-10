@@ -25,6 +25,7 @@ def main():
         print("[build] PyInstaller is required: pip install pyinstaller")
         return 1
 
+    from hubmon import config
     from hubmon.sensors import _presentmon_path
 
     args = [
@@ -38,7 +39,8 @@ def main():
         "--collect-all", "libusb_package",
     ]
 
-    presentmon = _presentmon_path()
+    # resolve exactly like the app does, so a configured path is bundled too
+    presentmon = _presentmon_path(config.load().presentmon_path)
     if presentmon:
         args += ["--add-binary", f"{presentmon}{os.pathsep}."]
         print(f"[build] bundling PresentMon: {presentmon}")

@@ -291,6 +291,7 @@ class Sensors:
         except Exception:
             pass
         self._cpu = _cpu_name()
+        self._host = socket.gethostname()
         self._gpu_name = ""
         self._fg = ForegroundFps(presentmon_path)
         self._net = None
