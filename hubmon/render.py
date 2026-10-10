@@ -8,11 +8,10 @@ Design notes
   the level is legible at a glance without reading the number.
 * Static chrome (backdrop, dark glass cards) is baked once; each frame redraws
   only what moves.
-* The backdrop is *animated* (drifting bokeh motes + a soft bloom), but every
-  element touches only its own small area, so the transport keeps sending cheap
-  partial updates instead of whole frames.
-* Colour carries meaning: each card's accent shifts with its load, and the
-  whole-panel bloom follows a dedicated power ramp.
+* Motion comes from the liquid itself: each card carries a hazy accent wash that
+  breathes under the pool (see ``_card_pulse``), and it is stepped one card at a
+  time so a frame never has to ship more than one card's tiles.
+* Colour carries meaning: each card's accent shifts with its load.
 * Numbers roll into place like a slot reel when they change (the panel now runs
   at tens of frames per second, so the motion reads properly).
 """
@@ -69,17 +68,16 @@ WATER_HZ = 9.0         # ripple steps per second
 WATER_STEP = 0.30      # radians advanced per step
 WATER_RISE = 1.1       # bob steps per second
 CARD_RADIUS = 16
-CARD_GLOW = 0.34       # backdrop glow that may leak into a card interior
 
 # Card "base rhythm": a hazy accent wash that breathes inside each card, under
 # the liquid. It is stepped one card at a time -- a wash morphing across every
 # card at once would dirty a whole card's worth of tiles on a single frame and
 # stall the link, so the per-step patch is kept to exactly one card.
-CARD_PULSE_HZ = 4.0    # wash steps per second (one card per step)
-CARD_PULSE_SPAN = 6.0  # seconds for one breath
-CARD_PULSE_R = 0.60    # glow radius, as a fraction of the card's short side
-CARD_PULSE_MIN = 0.05  # faintest wash
-CARD_PULSE_MAX = 0.14  # strongest wash
+CARD_PULSE_HZ = 6.0    # wash steps per second (one card per step)
+CARD_PULSE_SPAN = 4.5  # seconds for one breath
+CARD_PULSE_R = 0.75    # glow radius, as a fraction of the card's short side
+CARD_PULSE_MIN = 0.10  # faintest wash
+CARD_PULSE_MAX = 0.26  # strongest wash
 
 
 def _font(names, size):
@@ -329,79 +327,6 @@ def glow(img, x, y, r, color, strength):
     img.paste(blob, (int(x) - r, int(y) - r), m)
 
 
-class Motion:
-    """Drifting bokeh motes plus a soft bloom, composited over the panel.
-
-    Seeded so the pattern is deterministic; each mote is only a few pixels wide
-    which keeps the per-frame dirty area (and therefore the USB traffic) small.
-    """
-
-    def __init__(self, cfg):
-        rng = np.random.default_rng(11)
-        n = max(0, int(cfg.particles))
-        self.motes = []
-        for i in range(n):
-            self.motes.append(dict(
-                x=float(rng.uniform(0, W)), y=float(rng.uniform(0, H)),
-                r=int(rng.integers(3, 8)),
-                vx=float(rng.uniform(-7, 7)), vy=float(rng.uniform(-10, -3)),
-                phase=float(rng.uniform(0, 6.28)),
-                freq=float(rng.uniform(0.3, 0.9)),
-                cat=i % 3,          # 0 = CPU hue, 1 = GPU hue, 2 = neutral
-                glow=float(rng.uniform(22, 46))))
-        self.blooms = []
-        for i in range(max(0, int(cfg.blooms))):
-            self.blooms.append(dict(
-                x=float(rng.uniform(40, W - 40)), y=float(rng.uniform(30, H - 30)),
-                r=int(rng.integers(15, 21)),
-                vx=float(rng.uniform(-6, 6)), vy=float(rng.uniform(-4, 4)),
-                glow=float(rng.uniform(30, 44))))
-        self.t = 0.0
-
-    def _blob(self, img, x, y, r, color, strength):
-        glow(img, x, y, r, color, strength)
-
-    def step(self, dt, speed):
-        self.t += dt
-        s = max(0.0, speed)
-        for m in self.motes:
-            m["x"] += m["vx"] * dt * s
-            m["y"] += m["vy"] * dt * s
-            if m["y"] < -12:
-                m["y"] = H + 12
-            if m["x"] < -14:
-                m["x"] = W + 14
-            elif m["x"] > W + 14:
-                m["x"] = -14
-        for b in self.blooms:
-            b["x"] += b["vx"] * dt * s
-            b["y"] += b["vy"] * dt * s
-            if b["x"] < 20 or b["x"] > W - 20:
-                b["vx"] = -b["vx"]
-            if b["y"] < 20 or b["y"] > H - 20:
-                b["vy"] = -b["vy"]
-
-    def draw(self, img, cpu_col, gpu_col, power_col, dim=1.0, mask=None):
-        """Composite the bokeh over ``img``.
-
-        With a ``mask`` the glow is built on its own layer first: the backdrop
-        is much brighter than the cards, so letting it paint freely inside them
-        washes the type out and flattens the liquid.
-        """
-        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0)) if mask is not None else img
-        for b in self.blooms:
-            self._blob(layer, b["x"], b["y"], b["r"], power_col, b["glow"] * dim)
-        for m in self.motes:
-            a = m["glow"] * (0.55 + 0.45 * math.sin(self.t * m["freq"] + m["phase"]))
-            base = (232, 238, 248) if m["cat"] == 2 else (cpu_col if m["cat"] == 0
-                                                          else gpu_col)
-            self._blob(layer, m["x"], m["y"], m["r"],
-                       mix(base, (255, 255, 255), 0.25), a * dim)
-        if mask is not None:
-            layer.putalpha(ImageChops.multiply(layer.getchannel("A"), mask))
-            img.paste(layer, (0, 0), layer)
-
-
 # ------------------------------------------------------------- dashboard -----
 @dataclass
 class Vals:
@@ -457,7 +382,6 @@ class Dashboard:
         self._bar_tgt = {"cpu": 0.0, "gpu": 0.0}
         self._bar_acc = BAR_PERIOD
         self._static = None
-        self._mmask = None
         self._sig = None
         self._masks = {}
         self._pmasks = {}
@@ -473,7 +397,7 @@ class Dashboard:
         self._pulse_tick = -1
         self._bg_key = None
         self._bg_img = None
-        self.motion = Motion(self.cfg)
+        self._plain = False     # True while a user backdrop replaces the chrome
 
         # RGB565 softens thin strokes, so nothing is drawn in a regular weight
         self._f_lbl = F(11, "bold")
@@ -510,7 +434,8 @@ class Dashboard:
                 round(c.brightness, 3), round(c.bg_brightness, 3),
                 round(c.saturation, 3), round(c.glass, 3),
                 c.bg_image, round(c.bg_image_blur, 2),
-                round(c.bg_image_brightness, 2),
+                round(c.bg_image_brightness, 2), round(c.bg_image_zoom, 3),
+                round(c.bg_image_offset_x, 3), round(c.bg_image_offset_y, 3),
                 c.show_mem, c.show_power, c.show_fps)
 
     def apply_config(self, cfg, force=False):
@@ -527,8 +452,6 @@ class Dashboard:
             self._sig = sig
             self._layout()
             self._static = None            # chrome must be re-baked
-        self.motion = Motion(cfg) if (force or len(self.motion.motes) != int(cfg.particles)
-                                      or len(self.motion.blooms) != int(cfg.blooms)) else self.motion
 
     def _layout(self):
         keys = [k for k, _, _ in BOTTOM
@@ -578,24 +501,41 @@ class Dashboard:
 
     # ---------------------------------------------------------------- static
     def _load_bg_image(self, path):
-        """Cover-fit a user image to the panel and bake in blur + brightness."""
+        """Frame a user image onto the panel and bake in blur + brightness.
+
+        The zoom/offset pair is the panel's crop control: cover-fit first, then
+        zoom about the centre and slide the 320x170 window across the result.
+        """
         path = (path or "").strip().strip('"')
         if not path or not os.path.exists(path):
             return None
         try:
             src = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
-            src = ImageOps.fit(src, (W, H), method=Image.LANCZOS)
+            iw, ih = src.size
+            zoom = min(4.0, max(1.0, float(self.cfg.bg_image_zoom)))
+            scale = max(W / iw, H / ih) * zoom
+            src = src.resize((max(W, round(iw * scale)),
+                              max(H, round(ih * scale))), Image.LANCZOS)
+            sw, sh = src.size
+            ox = min(1.0, max(-1.0, float(self.cfg.bg_image_offset_x)))
+            oy = min(1.0, max(-1.0, float(self.cfg.bg_image_offset_y)))
+            left = max(0, min(sw - W, round((sw - W) * (1 + ox) / 2)))
+            top = max(0, min(sh - H, round((sh - H) * (1 + oy) / 2)))
+            out = src.crop((left, top, left + W, top + H))
             blur = max(0.0, float(self.cfg.bg_image_blur))
             if blur:
-                src = src.filter(ImageFilter.GaussianBlur(blur))
-            return ImageEnhance.Brightness(src).enhance(
+                out = out.filter(ImageFilter.GaussianBlur(blur))
+            return ImageEnhance.Brightness(out).enhance(
                 max(0.0, float(self.cfg.bg_image_brightness)))
         except Exception:
             return None
 
     def _background(self):
         key = (self.cfg.bg_image, round(self.cfg.bg_image_blur, 2),
-               round(self.cfg.bg_image_brightness, 2))
+               round(self.cfg.bg_image_brightness, 2),
+               round(self.cfg.bg_image_zoom, 3),
+               round(self.cfg.bg_image_offset_x, 3),
+               round(self.cfg.bg_image_offset_y, 3))
         if key != self._bg_key:
             self._bg_key = key
             self._bg_img = self._load_bg_image(self.cfg.bg_image)
@@ -677,26 +617,22 @@ class Dashboard:
                   (0, 0), self._round_mask(g, radius))
 
     def _build_static(self):
+        c = self.cfg
         back = ImageEnhance.Brightness(self._background()).enhance(
-            max(0.0, self.cfg.bg_brightness))
+            max(0.0, c.bg_brightness))
+        # a loaded user backdrop is the frame: the cards then carry no glass, no
+        # edge and no base, so the picture reads as one continuous sheet
+        self._plain = self._bg_img is not None
         enh = ImageEnhance.Color(back.filter(ImageFilter.GaussianBlur(10))
-                                 ).enhance(1.30 * self.cfg.saturation)
-        blur = ImageEnhance.Brightness(enh).enhance(self.cfg.brightness)
-        img = ImageEnhance.Brightness(back).enhance(self.cfg.brightness)
+                                 ).enhance(1.30 * c.saturation)
+        blur = ImageEnhance.Brightness(enh).enhance(c.brightness)
+        img = ImageEnhance.Brightness(back).enhance(c.brightness)
         for g in self.cards.values():
             self._card(blur, img, g, CARD_RADIUS)
 
         # card captions sit above the liquid fill, so they are drawn per frame
         # (see _labels) instead of being baked into the chrome
         self._static = img
-
-        # the animated backdrop keeps its full strength in the gaps, but only
-        # whispers inside the cards so the type and the liquid stay crisp
-        m = Image.new("L", (W, H), 255)
-        md = ImageDraw.Draw(m)
-        for g in self.cards.values():
-            md.rounded_rectangle(g.box, CARD_RADIUS, fill=int(255 * CARD_GLOW))
-        self._mmask = m.filter(ImageFilter.GaussianBlur(3))
 
     def _labels(self, d):
         """Card captions, redrawn each frame so the pool never tints them."""
@@ -712,6 +648,8 @@ class Dashboard:
                    stroke_width=1, stroke_fill=TEXT_SHADOW)
 
     def _card(self, blur, img, g: Geo, radius):
+        if self._plain:               # borderless: the picture is the frame
+            return
         sh = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         ImageDraw.Draw(sh).rounded_rectangle(
             (g.x + 1, g.y + 4, g.x + g.w + 1, g.y + g.h + 4), radius, fill=(0, 0, 0, 120))
@@ -845,7 +783,6 @@ class Dashboard:
     def step(self, dt):
         c = self.cfg
         self.time += dt
-        self.motion.step(dt, c.bg_speed if c.bg_motion else 0.0)
         k = 1 - math.exp(-dt * 4.0)
         for f in ("cpu", "gpu", "mem", "freq_cpu", "freq_gpu", "power", "cpu_power",
                   "gpu_power", "temp_gpu", "mem_used", "mem_total", "cpu_perf"):
@@ -948,25 +885,25 @@ class Dashboard:
         c = self.cfg
         cpu_col = hex_rgb(c.accent_cpu, ACCENT_CYAN)
         gpu_col = hex_rgb(c.accent_gpu, ACCENT_VIOLET)
+        mem_col = hex_rgb(c.accent_mem, ACCENT_CYAN)
         pwr_col = ramp(POWER_STOPS, self.v.power)
-        cpu_load = ramp([(0, cpu_col), (80, cpu_col), (92, ACCENT_AMBER),
-                         (100, ACCENT_RED)], self.v.cpu)
-        gpu_load = ramp([(0, gpu_col), (80, gpu_col), (92, ACCENT_AMBER),
-                         (100, ACCENT_RED)], self.v.gpu)
-
-        if c.bg_motion:
-            self.motion.draw(img, cpu_load, gpu_load, pwr_col,
-                             dim=max(0.0, c.bg_brightness), mask=self._mmask)
+        # the wash keeps the accent, but the power ramp is only followed in wide
+        # buckets: a tint that tracks the load continuously would re-paint the
+        # whole wash on every frame, and on a soft haze nobody can tell the
+        # buckets are there
+        pwr_tex = ramp(POWER_STOPS, 60.0 * round(self.v.power / 60.0))
 
         d = ImageDraw.Draw(img, "RGBA")
 
-        mem_col = hex_rgb(c.accent_mem, ACCENT_CYAN)
         # the hazy base rhythm sits under the liquid, so the pool reads as a
-        # body of water with light moving through its backdrop
+        # body of water with light moving through its backdrop. It is drawn in
+        # both modes: over the built-in gradient the card has a base of its own,
+        # and over a user backdrop the wash breathes on the picture itself --
+        # the card stays borderless and untinted apart from this haze.
         if c.card_glow:
             for i, (key, theme) in enumerate((("cpu", cpu_col), ("gpu", gpu_col),
                                               ("mem", mem_col),
-                                              ("power", pwr_col),
+                                              ("power", pwr_tex),
                                               ("fps", ACCENT_GREEN))):
                 g = self.cards.get(key)
                 if g is not None:

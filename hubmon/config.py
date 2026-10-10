@@ -31,14 +31,13 @@ class Config:
     roll_speed: float = 3.2      # rolls per second
 
     # ---- animated backdrop -------------------------------------------------
-    bg_motion: bool = True
-    bg_speed: float = 1.0
-    particles: int = 22
-    blooms: int = 2
     card_glow: bool = True       # hazy accent rhythm breathing inside each card
     bg_image: str = ""           # custom backdrop image; "" = built-in gradient
     bg_image_blur: float = 8.0   # Gaussian blur radius applied to that image, px
     bg_image_brightness: float = 1.0
+    bg_image_zoom: float = 1.0   # 1 = cover, up to 4 = cropped in
+    bg_image_offset_x: float = 0.0   # -1..1 pan of the crop window
+    bg_image_offset_y: float = 0.0
 
     # ---- look --------------------------------------------------------------
     brightness: float = 1.0

@@ -10,10 +10,77 @@ Only the standard library is used.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
+
+
+# --------------------------------------------------------------------------- #
+# Native "open image" dialog (Windows), so the panel can hand the choice over
+# to Explorer instead of asking the user to type a path.
+# --------------------------------------------------------------------------- #
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    class _OPENFILENAMEW(ctypes.Structure):
+        _fields_ = [
+            ("lStructSize", wintypes.DWORD),
+            ("hwndOwner", wintypes.HWND),
+            ("hInstance", wintypes.HINSTANCE),
+            ("lpstrFilter", wintypes.LPCWSTR),
+            ("lpstrCustomFilter", wintypes.LPWSTR),
+            ("nMaxCustFilter", wintypes.DWORD),
+            ("nFilterIndex", wintypes.DWORD),
+            ("lpstrFile", wintypes.LPWSTR),
+            ("nMaxFile", wintypes.DWORD),
+            ("lpstrFileTitle", wintypes.LPWSTR),
+            ("nMaxFileTitle", wintypes.DWORD),
+            ("lpstrInitialDir", wintypes.LPCWSTR),
+            ("lpstrTitle", wintypes.LPCWSTR),
+            ("Flags", wintypes.DWORD),
+            ("nFileOffset", wintypes.WORD),
+            ("nFileExtension", wintypes.WORD),
+            ("lpstrDefExt", wintypes.LPCWSTR),
+            ("lCustData", wintypes.LPARAM),
+            ("lpfnHook", ctypes.c_void_p),
+            ("lpTemplateName", wintypes.LPCWSTR),
+            # Vista+ tail: lStructSize has to match the full modern struct or
+            # the shell rejects the call outright
+            ("pvReserved", ctypes.c_void_p),
+            ("dwReserved", wintypes.DWORD),
+            ("FlagsEx", wintypes.DWORD),
+        ]
+
+
+def pick_image_path():
+    """Show the Windows open-file dialog; return the chosen path or ''."""
+    if os.name != "nt":
+        return ""
+    try:
+        OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST = 0x00001000, 0x00000800
+        OFN_EXPLORER, OFN_NOCHANGEDIR = 0x00080000, 0x00000008
+
+        buf = ctypes.create_unicode_buffer(1024)
+        ofn = _OPENFILENAMEW()
+        ofn.lStructSize = ctypes.sizeof(_OPENFILENAMEW)
+        ofn.hwndOwner = None
+        ofn.lpstrFilter = ("图片文件\0*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp\0"
+                           "所有文件\0*.*\0\0")
+        ofn.nFilterIndex = 1
+        ofn.lpstrFile = ctypes.cast(buf, wintypes.LPWSTR)
+        ofn.nMaxFile = len(buf)
+        ofn.lpstrTitle = "选择背景图片"
+        ofn.Flags = (OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER
+                     | OFN_NOCHANGEDIR)
+        if not ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(ofn)):
+            return ""
+        return buf.value
+    except Exception:
+        return ""
+
 
 # --------------------------------------------------------------------------- #
 # Form schema: one source of truth for both the backend and the injected JS.
@@ -78,18 +145,11 @@ SCHEMA = [
         ],
     },
     {
-        "title": "动态背景",
+        "title": "背景与动效",
         "icon": _ICON_BG,
         "rows": [
-            {"key": "bg_motion", "label": "背景动效", "type": "bool"},
-            {"key": "bg_speed", "label": "动效速度", "type": "num",
-             "min": 0, "max": 5, "step": 0.1, "unit": "×"},
-            {"key": "particles", "label": "粒子数量", "type": "num",
-             "min": 0, "max": 80, "step": 1, "unit": "个"},
-            {"key": "blooms", "label": "光晕数量", "type": "num",
-             "min": 0, "max": 8, "step": 1, "unit": "个"},
             {"key": "card_glow", "label": "卡片底色律动", "type": "bool"},
-            {"key": "bg_image", "label": "背景图片", "type": "text"},
+            {"key": "bg_image", "label": "背景图片", "type": "file"},
             {"key": "bg_image_blur", "label": "图片模糊", "type": "num",
              "min": 0, "max": 40, "step": 1, "unit": "px"},
             {"key": "bg_image_brightness", "label": "图片亮度", "type": "num",
@@ -408,6 +468,49 @@ _PAGE = r"""<!DOCTYPE html>
   /* long values (e.g. an executable path) need room to stay readable */
   .row-wide input.input{width:min(420px,58%);text-align:left}
 
+  /* ---- file picker: show the chosen path, choose it through Explorer ---- */
+  .row-wide .path{
+    font-size:13px;color:var(--muted);max-width:min(300px,44%);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    direction:rtl;text-align:left;
+  }
+  .row-wide .path.empty{color:var(--faint);direction:ltr}
+  .btn.small{
+    padding:9px 15px;font-size:13.5px;font-weight:580;border-radius:999px;
+    color:#bfe9ff;background:rgba(56,189,248,.13);
+    border:1px solid rgba(56,189,248,.28);box-shadow:var(--hi);
+  }
+  .btn.small:hover{background:rgba(56,189,248,.22)}
+  .btn.small.ghost{color:var(--muted);background:rgba(255,255,255,.06);
+    border-color:var(--card-line)}
+  .btn.small.ghost:hover{color:var(--text);background:rgba(255,255,255,.12)}
+  .btn.small[disabled]{opacity:.55;pointer-events:none}
+
+  /* ---- crop preview: drag to pan, slider to zoom, 320:170 window ---- */
+  .crop{display:flex;flex-direction:column;gap:11px}
+  .crop-view{
+    position:relative;overflow:hidden;width:100%;max-width:320px;
+    aspect-ratio:320/170;border-radius:12px;background:rgba(0,0,0,.35);
+    border:1px solid var(--card-line);
+    cursor:grab;touch-action:none;
+    box-shadow:inset 0 0 0 1px rgba(0,0,0,.25),var(--hi);
+  }
+  .crop-view:active{cursor:grabbing}
+  .crop-view img{
+    position:absolute;left:0;top:0;transform-origin:top left;
+    user-select:none;-webkit-user-drag:none;pointer-events:none;
+  }
+  .crop-ctl{display:flex;align-items:center;gap:12px;max-width:420px}
+  .crop-ctl input[type=range]{flex:1 1 auto}
+  .crop-ctl .value{
+    display:inline-flex;align-items:baseline;font-size:13px;font-weight:620;
+    color:#bfe9ff;background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.22);
+    border-radius:999px;padding:3px 11px;font-variant-numeric:tabular-nums;
+    box-shadow:var(--hi);white-space:nowrap;
+  }
+  .crop-ctl .value i{font-style:normal;font-size:11px;color:var(--muted);margin-left:4px}
+  .crop-hint{font-size:12px;color:var(--faint);margin-top:-3px}
+
   /* ---- action bar ---- */
   .actionbar{
     flex:0 0 auto;
@@ -482,6 +585,12 @@ _PAGE = r"""<!DOCTYPE html>
     .row-wide .spacer{display:none}
     .row-wide .label{white-space:nowrap}
     .row-wide input.input{flex:1 1 100%;width:100%;max-width:none}
+    .row-wide .path{flex:1 1 100%;max-width:none;text-align:left;direction:ltr}
+    /* the file-picker header wraps so the path gets a full line of its own */
+    .row.row-col .row-head{flex-wrap:wrap;gap:8px}
+    .row.row-col .row-head .spacer{display:none}
+    .row.row-col .row-head .path{flex:1 1 100%;max-width:none;text-align:left;direction:ltr}
+    .crop-view{max-width:none}
     .actionbar{padding:12px 14px calc(12px + env(safe-area-inset-bottom))}
   }
   @media (prefers-reduced-motion:reduce){
@@ -617,6 +726,133 @@ _PAGE = r"""<!DOCTYPE html>
       input = $('input', el);
       input.value = CFG[row.key] || '#ffffff';
       input.addEventListener('input', function(){ CFG[row.key] = input.value; });
+      return el;
+    }
+    if(row.type === 'file'){
+      el = document.createElement('div');
+      el.className = 'row row-col';
+      el.innerHTML =
+        '<div class="row-head">' +
+          '<span class="label">' + esc(row.label) + '</span>' +
+          '<div class="spacer"></div>' +
+          '<span class="path" data-path></span>' +
+          '<button class="btn small ghost" type="button" data-clear>清除</button>' +
+          '<button class="btn small" type="button" data-pick>选择图片…</button>' +
+        '</div>' +
+        '<div class="crop" data-crop>' +
+          '<div class="crop-view" data-view><img alt="背景取景预览" data-img></div>' +
+          '<div class="crop-ctl">' +
+            '<input type="range" min="1" max="4" step="0.05" data-zoom>' +
+            '<span class="value"><em data-zval>1.00</em><i>×</i></span>' +
+            '<button class="btn small ghost" type="button" data-reset>重置取景</button>' +
+          '</div>' +
+          '<div class="crop-hint">拖动图片平移取景，滑条缩放；这里的画面就是屏幕上的效果</div>' +
+        '</div>';
+      var pathEl = $('[data-path]', el);
+      var pickBtn = $('[data-pick]', el);
+      var clearBtn = $('[data-clear]', el);
+      var cropEl = $('[data-crop]', el);
+      var view = $('[data-view]', el);
+      var imgEl = $('[data-img]', el);
+      var zoomEl = $('[data-zoom]', el);
+      var zvalEl = $('[data-zval]', el);
+
+      /* metres of source per pixel of preview: mirrors the renderer's framing
+         (cover-fit, then zoom about the centre and slide a 320x170 window) */
+      function geom(){
+        var cw = view.clientWidth, ch = view.clientHeight;
+        var iw = imgEl.naturalWidth, ih = imgEl.naturalHeight;
+        if(!cw || !ch || !iw || !ih){ return null; }
+        var zoom = Math.min(4, Math.max(1, Number(CFG.bg_image_zoom) || 1));
+        var cover = Math.max(cw / iw, ch / ih) * zoom;
+        return {cw:cw, ch:ch, iw:iw, ih:ih, dw:iw*cover, dh:ih*cover};
+      }
+      function frame(){
+        var g = geom();
+        if(!g){ return; }
+        imgEl.style.width = g.dw + 'px';
+        imgEl.style.height = g.dh + 'px';
+        var maxx = Math.max(0, g.dw - g.cw), maxy = Math.max(0, g.dh - g.ch);
+        var ox = Math.min(1, Math.max(-1, Number(CFG.bg_image_offset_x) || 0));
+        var oy = Math.min(1, Math.max(-1, Number(CFG.bg_image_offset_y) || 0));
+        imgEl.style.transform = 'translate(' + (-(1+ox)*maxx/2) + 'px,' +
+                                             (-(1+oy)*maxy/2) + 'px)';
+      }
+      function show(){
+        var p = CFG[row.key] || '';
+        pathEl.textContent = p || '未选择 · 使用内置渐变背景';
+        pathEl.title = p;
+        pathEl.classList.toggle('empty', !p);
+        clearBtn.disabled = !p;
+        cropEl.style.display = p ? '' : 'none';
+        if(p){ imgEl.src = '/api/bg-image?t=' + Date.now(); }
+        var z = Math.min(4, Math.max(1, Number(CFG.bg_image_zoom) || 1));
+        zoomEl.value = z;
+        zvalEl.textContent = z.toFixed(2);
+        paintRange(zoomEl);
+        frame();
+      }
+      imgEl.addEventListener('load', frame);
+      zoomEl.addEventListener('input', function(){
+        CFG.bg_image_zoom = Number(zoomEl.value);
+        zvalEl.textContent = Number(zoomEl.value).toFixed(2);
+        paintRange(zoomEl); frame();
+      });
+      $('[data-reset]', el).addEventListener('click', function(){
+        CFG.bg_image_zoom = 1; CFG.bg_image_offset_x = 0; CFG.bg_image_offset_y = 0;
+        zoomEl.value = 1; zvalEl.textContent = '1.00'; paintRange(zoomEl); frame();
+        toast('取景已重置');
+      });
+      var drag = null;
+      function onDown(e){
+        var t = e.touches ? e.touches[0] : e;
+        drag = {x:t.clientX, y:t.clientY,
+                ox:Number(CFG.bg_image_offset_x) || 0,
+                oy:Number(CFG.bg_image_offset_y) || 0};
+        if(e.cancelable){ e.preventDefault(); }
+      }
+      function onMove(e){
+        if(!drag){ return; }
+        var g = geom();
+        if(!g){ return; }
+        var t = e.touches ? e.touches[0] : e;
+        var maxx = Math.max(1, g.dw - g.cw), maxy = Math.max(1, g.dh - g.ch);
+        CFG.bg_image_offset_x =
+          Math.min(1, Math.max(-1, drag.ox - 2*(t.clientX - drag.x)/maxx));
+        CFG.bg_image_offset_y =
+          Math.min(1, Math.max(-1, drag.oy - 2*(t.clientY - drag.y)/maxy));
+        frame();
+        if(e.cancelable){ e.preventDefault(); }
+      }
+      function onUp(){ drag = null; }
+      view.addEventListener('mousedown', onDown);
+      view.addEventListener('touchstart', onDown, {passive:false});
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+      document.addEventListener('touchmove', onMove, {passive:false});
+      document.addEventListener('touchend', onUp);
+
+      clearBtn.addEventListener('click', function(){
+        CFG[row.key] = ''; show(); toast('已清除，保存后生效');
+      });
+      pickBtn.addEventListener('click', function(){
+        pickBtn.disabled = true; pickBtn.textContent = '选择中…';
+        fetch('/api/pick-image', {method:'POST'})
+          .then(function(r){ return r.json(); })
+          .then(function(d){
+            if(d && d.ok && d.path){
+              CFG[row.key] = d.path; show(); toast('已选择，保存后生效');
+            } else if(d && d.cancelled){
+              toast('已取消');
+            } else {
+              toast('选择失败，可手动填写路径');
+            }
+          })
+          .catch(function(){ toast('选择失败，可手动填写路径'); })
+          .then(function(){ pickBtn.disabled = false; pickBtn.textContent = '选择图片…'; });
+      });
+      show();
+      window.addEventListener('resize', frame);
       return el;
     }
     /* port / text */
@@ -822,12 +1058,17 @@ class _Server(ThreadingHTTPServer):
     provider = None
     actual_port = None
     on_quit = None
+    choose_image = None
 
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "hubmon"
     sys_version = ""
     protocol_version = "HTTP/1.1"
+
+    # only ever serves the file the user picked, so the panel can show it
+    _IMG_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                  ".bmp": "image/bmp", ".gif": "image/gif", ".webp": "image/webp"}
 
     # keep the console clean
     def log_message(self, *args):  # noqa: D401
@@ -853,6 +1094,21 @@ class _Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self._respond(code, body, "application/json; charset=utf-8")
 
+    def _serve_bg_image(self):
+        """Stream the configured backdrop image so the crop preview can use it."""
+        p = (self.server.cfg.bg_image or "").strip().strip('"')
+        ctype = self._IMG_TYPES.get(os.path.splitext(p)[1].lower())
+        if not p or not ctype or not os.path.exists(p):
+            self._json(404, {"ok": False, "error": "no image"})
+            return
+        try:
+            with open(p, "rb") as f:
+                body = f.read()
+        except OSError as exc:
+            self._json(404, {"ok": False, "error": str(exc)})
+            return
+        self._respond(200, body, ctype)
+
     # ------------------------------------------------------------------ GET
     def do_GET(self):
         try:
@@ -862,6 +1118,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._respond(200, html, "text/html; charset=utf-8")
             elif path == "/api/config":
                 self._json(200, self.server.cfg.to_dict())
+            elif path == "/api/bg-image":
+                self._serve_bg_image()
             elif path == "/api/stats":
                 data = self.server.provider()
                 self._json(200, data if isinstance(data, dict) else {})
@@ -891,6 +1149,13 @@ class _Handler(BaseHTTPRequestHandler):
                 if cb is not None:
                     # let the response reach the browser before we tear down
                     threading.Timer(0.35, cb).start()
+            elif path == "/api/pick-image":
+                fn = self.server.choose_image or pick_image_path
+                picked = fn()
+                if picked:
+                    self._json(200, {"ok": True, "path": picked})
+                else:
+                    self._json(200, {"ok": False, "cancelled": True})
             else:
                 self._json(404, {"ok": False, "error": "not found"})
         except Exception as exc:
@@ -900,7 +1165,8 @@ class _Handler(BaseHTTPRequestHandler):
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
-def start(cfg, provider, port=None, open_browser=False, on_quit=None):
+def start(cfg, provider, port=None, open_browser=False, on_quit=None,
+          choose_image=None):
     """Start the panel on 127.0.0.1 and return the running server."""
     base = int(port if port is not None else getattr(cfg, "ui_port", 8756))
 
@@ -925,6 +1191,7 @@ def start(cfg, provider, port=None, open_browser=False, on_quit=None):
     httpd.provider = provider
     httpd.actual_port = actual
     httpd.on_quit = on_quit
+    httpd.choose_image = choose_image or pick_image_path
 
     thread = threading.Thread(
         target=httpd.serve_forever, name="hubmon-webui", daemon=True
