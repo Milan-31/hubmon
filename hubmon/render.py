@@ -58,7 +58,7 @@ BAR_OMEGA = 3.4
 # ripple is stepped at a low rate on purpose -- every moved pixel costs USB
 # bandwidth, and a slow slosh reads as water just as convincingly as a fast one.
 WATER_AMP = 1.7        # px of surface ripple
-WATER_LAM = 46.0       # px per ripple
+WATER_LAM = 74.0       # px per ripple
 WATER_HZ = 9.0         # ripple steps per second
 WATER_STEP = 0.30      # radians advanced per step
 CARD_RADIUS = 16
@@ -655,10 +655,11 @@ class Dashboard:
     def _water(self, img, key, g: Geo, pct, theme):
         """Fill card ``g`` with liquid up to ``pct``%, returning the surface y.
 
-        The liquid is a saturated body lit from above: an absolute vertical
-        gradient (bright at the card top, deep at its bottom) topped by a light
-        meniscus that rides the level. The ripple is stepped, which holds the
-        moving band -- and the USB traffic it costs -- to a few pixel rows.
+        The waterline is anti-aliased: a pixel's water coverage is the fraction
+        of its square that falls below the surface, so the wave reads as a
+        smooth curve instead of the staircase a hard threshold produces on a
+        320 px panel. The crest is a separate soft highlight laid over the top
+        of the body, which keeps the surface readable at a glance.
 
         Every term is a function of the *card* row, never of the depth below the
         surface. If the shading moved with the surface, one level step would
@@ -676,19 +677,22 @@ class Dashboard:
         yy = np.arange(h, dtype=np.float32)[:, None]
         xx = np.arange(w, dtype=np.float32)[None, :]
         ph = (int(self.time * WATER_HZ) % 4000) * WATER_STEP
-        surf = sy + WATER_AMP * (0.68 * np.sin(xx / WATER_LAM * 6.283 + ph)
-                                 + 0.32 * np.sin(xx / (WATER_LAM * 0.43) * 6.283
+        # two long swells rather than a long one plus a short one: a wavelength
+        # close to the pixel grid is what makes a wavy edge look jagged
+        surf = sy + WATER_AMP * (0.70 * np.sin(xx / WATER_LAM * 6.283 + ph)
+                                 + 0.30 * np.sin(xx / (WATER_LAM * 0.47) * 6.283
                                                  - ph * 1.7))
-        depth = yy - surf                      # >= 0 inside the liquid
+        depth = yy - surf                      # >= 0 below the waterline
 
+        # coverage of row yy by water, ramped over one pixel -> edge AA
+        cov = np.clip(depth + 0.5, 0.0, 1.0)
         grad = yy / float(h - 1)               # 0 at card top, 1 at card bottom
-        alpha = np.where(depth >= 0.0, 232.0 - 96.0 * grad, 0.0)
-        rim = (depth >= 0.0) & (depth < 1.4)
-        alpha = np.where(rim, 248.0, alpha)                    # meniscus
-        alpha = alpha * self._card_mask_np(key, g)
+        a_body = (232.0 - 96.0 * grad) * cov / 255.0
+        # the crest hugs the waterline and fades into the body, so it needs no
+        # hard band of its own
+        a_rim = 0.92 * cov * np.clip(1.0 - depth / 1.7, 0.0, 1.0)
 
-        shallow = np.where(rim, np.clip(1.0 - depth / 1.4, 0.0, 1.0),
-                           np.clip(1.0 - depth / 2.6, 0.0, 1.0))[..., None]
+        a = a_rim + a_body * (1.0 - a_rim)
         # the body stays darker than the accent and deepens downwards: a light
         # fill would fight the white readouts that sit on top of it
         lip = np.array(mix(theme, (255, 255, 255), 0.80), np.float32)[None, None, :]
@@ -696,10 +700,11 @@ class Dashboard:
                 * (1.0 - grad[..., None])
                 + np.array(mix(theme, (0, 0, 0), 0.66), np.float32)
                 * grad[..., None])
-        col = deep * (1.0 - shallow) + lip * shallow
+        num = (lip * a_rim[..., None] + deep * (a_body * (1.0 - a_rim))[..., None])
+        col = num / np.maximum(a, 1e-6)[..., None]
+        a = (a * self._card_mask_np(key, g))[..., None]
 
         sub = np.asarray(img.crop(g.box), np.float32)
-        a = (alpha / 255.0)[..., None]
         img.paste(Image.fromarray(
             np.clip(sub * (1.0 - a) + col * a, 0, 255).astype(np.uint8), "RGB"),
             (g.x, g.y))
