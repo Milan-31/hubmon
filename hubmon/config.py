@@ -43,7 +43,7 @@ class Config:
     glass: float = 1.0           # glass tint strength
     accent_cpu: str = "#38bdf8"
     accent_gpu: str = "#a78bfa"
-    accent_mem: str = "#38bdf8"
+    accent_mem: str = "#22d3ee"
     accent_pwr: str = "#fbbf24"
     show_mem: bool = True
     show_power: bool = True

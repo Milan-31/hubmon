@@ -1,0 +1,1051 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "佳点 V1 和 V2 GUI 本地 API",
+    "version": "0.1.0",
+    "description": "2026-10-10 当前项目源码接口。仅监听 127.0.0.1:8765，需要 GUI 主实例运行。包含已有 HTTP 路径，规划 /api/v1 路径尚未实现。当前主服务无 API Key；浏览器 Origin 只允许指定官方域名及 http://localhost、http://127.0.0.1 可带端口，不带 Origin 的本地程序允许。V1 / V1PRO / V2 支持程度取决于 GUI 识别及固件能力，不能将 200 视为硬件完成。"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8765",
+      "description": "本机 GUI 主实例；不是公网服务"
+    }
+  ],
+  "tags": [
+    {
+      "name": "文字"
+    },
+    {
+      "name": "设备状态"
+    },
+    {
+      "name": "USB 移交"
+    },
+    {
+      "name": "CORS"
+    }
+  ],
+  "paths": {
+    "/live": {
+      "post": {
+        "operationId": "submitLiveText",
+        "summary": "向主窗口提交实时文字",
+        "description": "异步交给 GUI 主窗口 core；不按 serial 路由，不返回任务编号。200 只表示提交，设备未连接或被其他模式占用时可能随后不执行。忙碌期间仅保留最新一条待发送文字。",
+        "tags": [
+          "文字"
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "UTF-8 JSON 对象，总请求体最多 16384 字节；提供 Content-Length，不使用 chunked 请求体。",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TextRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "处理成功；含义以对应接口说明为准",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求体或参数格式错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "网页 Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "接口回调异常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "summary": "浏览器 CORS 预检",
+        "description": "按 Origin 验证；声明允许 GET, POST, OPTIONS 和 Content-Type。声明的 Private-Network 响应头不保证每个浏览器都可访问。",
+        "tags": [
+          "CORS"
+        ],
+        "responses": {
+          "204": {
+            "description": "允许的 Origin 预检成功"
+          },
+          "403": {
+            "description": "Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "post": {
+        "operationId": "submitLiveTextAlias",
+        "summary": "实时文字兼容别名",
+        "description": "异步交给 GUI 主窗口 core；不按 serial 路由，不返回任务编号。200 只表示提交，设备未连接或被其他模式占用时可能随后不执行。忙碌期间仅保留最新一条待发送文字。",
+        "tags": [
+          "文字"
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "UTF-8 JSON 对象，总请求体最多 16384 字节；提供 Content-Length，不使用 chunked 请求体。",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TextRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "处理成功；含义以对应接口说明为准",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求体或参数格式错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "网页 Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "接口回调异常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "deprecated": true
+      },
+      "options": {
+        "summary": "浏览器 CORS 预检",
+        "description": "按 Origin 验证；声明允许 GET, POST, OPTIONS 和 Content-Type。声明的 Private-Network 响应头不保证每个浏览器都可访问。",
+        "tags": [
+          "CORS"
+        ],
+        "responses": {
+          "204": {
+            "description": "允许的 Origin 预检成功"
+          },
+          "403": {
+            "description": "Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/usb/status": {
+      "get": {
+        "operationId": "getUsbStatus",
+        "summary": "查询 GUI 管理的设备与 USB 状态",
+        "description": "不是完整物理 USB 扫描或独立硬件读回。指定未知 SN 也可能返回 200 / ok=true，同时 connected=false、busy=true。身份和容量字段可缺省。",
+        "tags": [
+          "设备状态"
+        ],
+        "responses": {
+          "200": {
+            "description": "处理成功；含义以对应接口说明为准",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "网页 Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "接口或对应 GUI 回调不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "设备忙碌、目标不匹配或租约失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "接口回调异常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "GUI、目标设备进程未响应或 USB 资源释放失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "serial",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "完整 24 位十六进制设备序列号，推荐大写；示例全零只作占位",
+              "example": "000000000000000000000000"
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "getUsbStatusByPost",
+        "summary": "查询 GUI 管理的设备与 USB 状态",
+        "description": "不是完整物理 USB 扫描或独立硬件读回。指定未知 SN 也可能返回 200 / ok=true，同时 connected=false、busy=true。身份和容量字段可缺省。",
+        "tags": [
+          "设备状态"
+        ],
+        "responses": {
+          "200": {
+            "description": "处理成功；含义以对应接口说明为准",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求体或参数格式错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "网页 Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "接口或对应 GUI 回调不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "设备忙碌、目标不匹配或租约失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "接口回调异常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "GUI、目标设备进程未响应或 USB 资源释放失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "UTF-8 JSON 对象，总请求体最多 16384 字节；提供 Content-Length，不使用 chunked 请求体。",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StatusRequest"
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "summary": "浏览器 CORS 预检",
+        "description": "按 Origin 验证；声明允许 GET, POST, OPTIONS 和 Content-Type。声明的 Private-Network 响应头不保证每个浏览器都可访问。",
+        "tags": [
+          "CORS"
+        ],
+        "responses": {
+          "204": {
+            "description": "允许的 Origin 预检成功"
+          },
+          "403": {
+            "description": "Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/usb/handoff/start": {
+      "post": {
+        "operationId": "startUsbHandoff",
+        "summary": "申请指定设备的 USB 移交租约",
+        "description": "推荐始终传完整 SN。省略时仅在恰有一台已连接设备时自动选择。等待资源释放，客户端建议至少 15 秒超时。取得非空 leaseId 后再自行打开同一 SN 的 USB；本接口不替第三方发送素材。",
+        "tags": [
+          "USB 移交"
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "UTF-8 JSON 对象，总请求体最多 16384 字节；提供 Content-Length，不使用 chunked 请求体。",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "处理成功；含义以对应接口说明为准",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求体或参数格式错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "网页 Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "接口或对应 GUI 回调不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "设备忙碌、目标不匹配或租约失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "接口回调异常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "GUI、目标设备进程未响应或 USB 资源释放失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "summary": "浏览器 CORS 预检",
+        "description": "按 Origin 验证；声明允许 GET, POST, OPTIONS 和 Content-Type。声明的 Private-Network 响应头不保证每个浏览器都可访问。",
+        "tags": [
+          "CORS"
+        ],
+        "responses": {
+          "204": {
+            "description": "允许的 Origin 预检成功"
+          },
+          "403": {
+            "description": "Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/usb/handoff/keepalive": {
+      "post": {
+        "operationId": "keepUsbHandoffAlive",
+        "summary": "续期 USB 租约",
+        "description": "建议每 20 秒调用；每次成功将核心租约续为 90 秒。失败后停止 USB 写入、关闭句柄并重新选择设备。",
+        "tags": [
+          "USB 移交"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "UTF-8 JSON 对象，总请求体最多 16384 字节；提供 Content-Length，不使用 chunked 请求体。",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeaseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "处理成功；含义以对应接口说明为准",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeepaliveResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求体或参数格式错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "网页 Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "接口或对应 GUI 回调不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "设备忙碌、目标不匹配或租约失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "接口回调异常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "GUI、目标设备进程未响应或 USB 资源释放失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "summary": "浏览器 CORS 预检",
+        "description": "按 Origin 验证；声明允许 GET, POST, OPTIONS 和 Content-Type。声明的 Private-Network 响应头不保证每个浏览器都可访问。",
+        "tags": [
+          "CORS"
+        ],
+        "responses": {
+          "204": {
+            "description": "允许的 Origin 预检成功"
+          },
+          "403": {
+            "description": "Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/usb/handoff/finish": {
+      "post": {
+        "operationId": "finishUsbHandoff",
+        "summary": "归还 USB 租约",
+        "description": "调用前先释放第三方 USB 接口并关闭句柄。已成功 finish 的同一租约约 180 秒内重放通常返回 released=false；未知或过期租约不保证幂等成功。",
+        "tags": [
+          "USB 移交"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "UTF-8 JSON 对象，总请求体最多 16384 字节；提供 Content-Length，不使用 chunked 请求体。",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeaseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "处理成功；含义以对应接口说明为准",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FinishResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求体或参数格式错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "网页 Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "接口或对应 GUI 回调不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "设备忙碌、目标不匹配或租约失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "接口回调异常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "GUI、目标设备进程未响应或 USB 资源释放失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "summary": "浏览器 CORS 预检",
+        "description": "按 Origin 验证；声明允许 GET, POST, OPTIONS 和 Content-Type。声明的 Private-Network 响应头不保证每个浏览器都可访问。",
+        "tags": [
+          "CORS"
+        ],
+        "responses": {
+          "204": {
+            "description": "允许的 Origin 预检成功"
+          },
+          "403": {
+            "description": "Origin 不允许",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "error": {
+            "type": "string"
+          },
+          "serial": {
+            "type": "string",
+            "description": "完整 24 位十六进制设备序列号，推荐大写；示例全零只作占位",
+            "example": "000000000000000000000000"
+          }
+        },
+        "required": [
+          "ok",
+          "error"
+        ],
+        "additionalProperties": true
+      },
+      "TextRequest": {
+        "type": "object",
+        "description": "推荐显式传字符串 text；未传时服务提交空字符串。请求体总上限 16384 UTF-8 字节。",
+        "properties": {
+          "text": {
+            "type": "string",
+            "example": "Hello V1PRO / V2"
+          }
+        },
+        "additionalProperties": true
+      },
+      "Accepted": {
+        "type": "object",
+        "description": "请求已交给 GUI，不能据此认定设备已显示或完成。",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "DeviceStatus": {
+        "type": "object",
+        "description": "GUI 缓存的逻辑状态。识别、容量、异常状态字段可能缺省，部分异常子进程记录不含 ok。",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "guiRunning": {
+            "type": "boolean"
+          },
+          "connected": {
+            "type": "boolean"
+          },
+          "serial": {
+            "type": "string",
+            "description": "完整 24 位十六进制设备序列号，推荐大写；示例全零只作占位",
+            "example": "000000000000000000000000"
+          },
+          "busy": {
+            "type": "boolean"
+          },
+          "busyReason": {
+            "type": "string"
+          },
+          "handoffActive": {
+            "type": "boolean"
+          },
+          "handoffError": {
+            "type": "string"
+          },
+          "ownershipState": {
+            "type": "string",
+            "enum": [
+              "software",
+              "handoff",
+              "web",
+              "disconnected"
+            ]
+          },
+          "ownershipMessage": {
+            "type": "string"
+          },
+          "leaseExpiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix 毫秒时间戳"
+          },
+          "vid": {
+            "type": "integer"
+          },
+          "pid": {
+            "type": "integer"
+          },
+          "hardwareVariant": {
+            "type": "string"
+          },
+          "panelWidth": {
+            "type": "integer"
+          },
+          "panelHeight": {
+            "type": "integer"
+          },
+          "maxMaterialFps": {
+            "type": "integer"
+          },
+          "maxFrames": {
+            "type": "integer"
+          },
+          "maxPayloadBytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "available": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "StatusResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DeviceStatus"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "apiVersion": {
+                "type": "integer",
+                "enum": [
+                  2
+                ],
+                "description": "USB 移交路由版本，不是整套 SDK 版本"
+              },
+              "devices": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DeviceStatus"
+                }
+              },
+              "capabilities": {
+                "type": "object",
+                "properties": {
+                  "multiDeviceHandoff": {
+                    "type": "boolean"
+                  },
+                  "explicitSerial": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "multiDeviceHandoff",
+                  "explicitSerial"
+                ]
+              }
+            },
+            "required": [
+              "apiVersion",
+              "devices",
+              "capabilities"
+            ]
+          }
+        ]
+      },
+      "StatusRequest": {
+        "type": "object",
+        "properties": {
+          "serial": {
+            "type": "string",
+            "description": "完整 24 位十六进制设备序列号，推荐大写；示例全零只作占位",
+            "example": "000000000000000000000000"
+          }
+        },
+        "additionalProperties": true
+      },
+      "StartRequest": {
+        "type": "object",
+        "properties": {
+          "serial": {
+            "type": "string",
+            "description": "完整 24 位十六进制设备序列号，推荐大写；示例全零只作占位",
+            "example": "000000000000000000000000"
+          },
+          "clientId": {
+            "type": "string",
+            "description": "推荐会话唯一值；核心最多保留 128 字符。同一非空 clientId 可复用当前租约，不是身份认证。"
+          },
+          "ttlSeconds": {
+            "type": "number",
+            "default": 90,
+            "description": "核心限制到 30～180 秒；无效值回退默认。后续 keepalive 固定续期为 90 秒。"
+          }
+        },
+        "additionalProperties": true
+      },
+      "StartResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "leaseId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix 毫秒时间戳"
+          },
+          "serial": {
+            "type": "string",
+            "description": "完整 24 位十六进制设备序列号，推荐大写；示例全零只作占位",
+            "example": "000000000000000000000000"
+          },
+          "pid": {
+            "type": "integer"
+          },
+          "reused": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "leaseId",
+          "expiresAt",
+          "serial"
+        ],
+        "additionalProperties": true
+      },
+      "LeaseRequest": {
+        "type": "object",
+        "properties": {
+          "leaseId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "serial": {
+            "type": "string",
+            "description": "完整 24 位十六进制设备序列号，推荐大写；示例全零只作占位",
+            "example": "000000000000000000000000"
+          }
+        },
+        "required": [
+          "leaseId"
+        ],
+        "additionalProperties": true
+      },
+      "KeepaliveResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "leaseId": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix 毫秒时间戳"
+          }
+        },
+        "required": [
+          "ok",
+          "leaseId",
+          "expiresAt"
+        ],
+        "additionalProperties": true
+      },
+      "FinishResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "released": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "released"
+        ],
+        "additionalProperties": true
+      }
+    }
+  }
+}
