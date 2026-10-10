@@ -1,0 +1,23 @@
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ------------------------------------------------------------ build output
+build/
+dist/
+/hubmon.spec
+
+# ------------------------------------------------------------ local / private
+# scratch work: probes, firmware dumps, vendor binaries, preview frames
+re/
+pv*/
+preview*/
+
+# ----------------------------------------------------------------- editor/OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
