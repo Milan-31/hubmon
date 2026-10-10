@@ -8,10 +8,10 @@ Design notes
   the level is legible at a glance without reading the number.
 * Static chrome (backdrop, dark glass cards) is baked once; each frame redraws
   only what moves.
-* Motion comes from the liquid itself: each card carries a hazy accent wash that
-  breathes under the pool (see ``_card_pulse``), and it is stepped one card at a
-  time so a frame never has to ship more than one card's tiles.
-* Colour carries meaning: each card's accent shifts with its load.
+* Motion is data, never decoration: what moves is the pools, the numerals and
+  the load warning ring. Nothing drifts across the backdrop.
+* Colour carries meaning: each card's accent shifts with its load, and the
+  backdrop is a vertical gradient whose stops the user picks.
 * Numbers roll into place like a slot reel when they change (the panel now runs
   at tens of frames per second, so the motion reads properly).
 """
@@ -31,6 +31,7 @@ W, H = 320, 170
 
 # ---------------------------------------------------------------- palette ----
 BG_TOP = (10, 14, 22)
+BG_MID = (13, 18, 28)
 BG_BOTTOM = (16, 21, 34)
 TEXT = (244, 247, 252)
 # RGB565 quantisation plus the tiny panel soften thin, low-contrast type, so the
@@ -68,16 +69,6 @@ WATER_HZ = 9.0         # ripple steps per second
 WATER_STEP = 0.30      # radians advanced per step
 WATER_RISE = 1.1       # bob steps per second
 CARD_RADIUS = 16
-
-# Card "base rhythm": a hazy accent wash that breathes inside each card, under
-# the liquid. It is stepped one card at a time -- a wash morphing across every
-# card at once would dirty a whole card's worth of tiles on a single frame and
-# stall the link, so the per-step patch is kept to exactly one card.
-CARD_PULSE_HZ = 6.0    # wash steps per second (one card per step)
-CARD_PULSE_SPAN = 4.5  # seconds for one breath
-CARD_PULSE_R = 0.75    # glow radius, as a fraction of the card's short side
-CARD_PULSE_MIN = 0.10  # faintest wash
-CARD_PULSE_MAX = 0.26  # strongest wash
 
 
 def _font(names, size):
@@ -294,39 +285,6 @@ class RollText:
             cx += cw
 
 
-# ------------------------------------------------------------ motion layer ---
-def _radial_mask(r):
-    d = np.arange(-r, r + 1, dtype=np.float32)
-    yy, xx = np.meshgrid(d, d, indexing="ij")
-    a = np.clip(1.0 - np.sqrt(xx * xx + yy * yy) / max(1.0, r), 0.0, 1.0) ** 2
-    return a
-
-
-_MASKS: dict = {}
-
-
-def _mask(r):
-    m = _MASKS.get(r)
-    if m is None:
-        m = _radial_mask(r)
-        _MASKS[r] = m
-    return m
-
-
-def glow(img, x, y, r, color, strength):
-    """Paste a soft radial halo of ``color`` centred on (x, y).
-
-    ``strength`` is the alpha in 0..255 at the halo's centre; it tapers to zero
-    at the rim.
-    """
-    if r <= 0 or strength <= 1:
-        return
-    m = Image.fromarray(
-        np.clip(_mask(r) * strength, 0.0, 255.0).astype(np.uint8), "L")
-    blob = Image.new("RGBA", (2 * r + 1, 2 * r + 1), tuple(color) + (255,))
-    img.paste(blob, (int(x) - r, int(y) - r), m)
-
-
 # ------------------------------------------------------------- dashboard -----
 @dataclass
 class Vals:
@@ -384,7 +342,6 @@ class Dashboard:
         self._static = None
         self._sig = None
         self._masks = {}
-        self._pmasks = {}
         self._cpu_short = ""
         self._gpu_short = ""
         # liquid flow: last level seen per card, and the tilt it left behind
@@ -392,9 +349,6 @@ class Dashboard:
         self._tilt = {}
         self._tick = -1
         self._cores = "—"
-        # card base rhythm: per-card phase, advanced one card per step
-        self._pulse = {}
-        self._pulse_tick = -1
         self._bg_key = None
         self._bg_img = None
         self._plain = False     # True while a user backdrop replaces the chrome
@@ -433,6 +387,7 @@ class Dashboard:
         return (c.accent_cpu, c.accent_gpu, c.accent_mem, c.accent_pwr,
                 round(c.brightness, 3), round(c.bg_brightness, 3),
                 round(c.saturation, 3), round(c.glass, 3),
+                c.bg_color_top, c.bg_color_mid, c.bg_color_bot,
                 c.bg_image, round(c.bg_image_blur, 2),
                 round(c.bg_image_brightness, 2), round(c.bg_image_zoom, 3),
                 round(c.bg_image_offset_x, 3), round(c.bg_image_offset_y, 3),
@@ -467,12 +422,6 @@ class Dashboard:
             for i, k in enumerate(keys):
                 self.cards[k] = Geo(8 + i * (cw + 5), 106, cw, 58)
         self._masks = {}          # geometry changed -> card masks must be rebuilt
-        self._pmasks = {}
-        # stagger each card's breath so the base rhythm is not one synchronised
-        # flash across the whole panel
-        n = max(1, len(self.cards))
-        self._pulse = {k: i * (CARD_PULSE_SPAN / n)
-                       for i, k in enumerate(self.cards)}
 
     # -- target values come from the sensor layer --------------------------
     def update(self, stats):
@@ -549,22 +498,19 @@ class Dashboard:
             px *= np.clip(1.06 - 0.18 * r, 0, 1.2)[:, :, None]
             return Image.fromarray(np.clip(px, 0, 255).astype(np.uint8), "RGB")
 
-        ys = np.linspace(0, 1, H)[:, None, None]
-        px = np.empty((H, W, 3), np.float32)
-        px[:] = (np.array(BG_TOP, np.float32) * (1 - ys)
-                 + np.array(BG_BOTTOM, np.float32) * ys)
-        for (gx, gy, gr, col, amt) in (
-            (26, 26, 78, ACCENT_CYAN, 0.62),
-            (296, 26, 78, ACCENT_VIOLET, 0.58),
-            (48, 150, 66, ACCENT_VIOLET, 0.52),
-            (272, 152, 66, ACCENT_CYAN, 0.54),
-            (160, 106, 96, ACCENT_GREEN, 0.22),
-        ):
-            d = np.sqrt((xx - gx) ** 2 + (yy - gy) ** 2)
-            px += (np.clip(1 - d / gr, 0, 1) ** 2 * amt)[:, :, None] * np.array(col, np.float32)
-        px *= np.clip(1.04 - 0.10 * r, 0, 1.2)[:, :, None]
-        px += np.random.default_rng(7).normal(0.0, 3.0, (H, W, 1)).astype(np.float32)
-        px += (((xx % 16 == 0) | (yy % 16 == 0)).astype(np.float32) * 4.0)[:, :, None]
+        # no photo: a plain vertical ramp through the three user-picked stops.
+        # The dither earns its keep -- RGB565 has 32 red / 64 green / 32 blue
+        # levels, and an un-dithered dark ramp bands badly on this panel.
+        stops = np.array((hex_rgb(self.cfg.bg_color_top, BG_TOP),
+                          hex_rgb(self.cfg.bg_color_mid, BG_MID),
+                          hex_rgb(self.cfg.bg_color_bot, BG_BOTTOM)), np.float32)
+        at = np.linspace(0.0, 2.0, H, dtype=np.float32)
+        lo = np.clip(np.floor(at).astype(np.intp), 0, 1)
+        frac = (at - lo)[:, None]
+        px = stops[lo] * (1.0 - frac) + stops[lo + 1] * frac
+        px = np.repeat(px[:, None, :], W, axis=1)
+        px *= np.clip(1.03 - 0.10 * r, 0, 1.2)[:, :, None]
+        px += np.random.default_rng(7).normal(0.0, 2.5, (H, W, 1)).astype(np.float32)
         return Image.fromarray(np.clip(px, 0, 255).astype(np.uint8), "RGB")
 
     def _vgrad(self, top_a, bot_a):
@@ -584,14 +530,6 @@ class Dashboard:
              (g.x + g.w - inset) * s, (g.y + g.h - inset) * s),
             max(1, radius - inset) * s, fill=255)
         return m.resize((W, H), Image.LANCZOS)
-
-    def _card_pmask(self, key, g: Geo):
-        """Cached full-size card mask, for the per-frame base rhythm."""
-        m = self._pmasks.get(key)
-        if m is None:
-            m = self._round_mask(g, CARD_RADIUS)
-            self._pmasks[key] = m
-        return m
 
     def _edge_layer(self, g: Geo, radius, inset, top_a, bot_a):
         s = self.MASK_SS
@@ -687,30 +625,6 @@ class Dashboard:
                            np.float32) / 255.0
             self._masks[key] = m
         return m
-
-    def _card_pulse(self, img, key, g: Geo, theme, seed):
-        """A hazy accent wash drifting inside the card, beneath the liquid.
-
-        Reads as the card's base colour breathing. The wash is driven by a
-        per-card phase that only advances one card at a time (see ``step``), so
-        a single frame never has to repaint more than one card's worth of tiles.
-        """
-        t = self._pulse.get(key)
-        if t is None:
-            return
-        cyc = 2.0 * math.pi / CARD_PULSE_SPAN
-        r = max(12, int(CARD_PULSE_R * min(g.w, g.h)))
-        cx = g.x + g.w * (0.5 + 0.20 * math.sin(t * cyc + seed))
-        cy = g.y + g.h * (0.60 + 0.16 * math.cos(t * cyc * 0.8 + seed * 1.6))
-        amp = CARD_PULSE_MIN + (CARD_PULSE_MAX - CARD_PULSE_MIN) * (
-            0.5 + 0.5 * math.sin(t * cyc + seed * 2.0))
-        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        glow(layer, cx, cy, r, theme, amp * 255.0)
-        # clip the wash to the (anti-aliased) card outline so it never bleeds
-        # past the rounded edge
-        layer.putalpha(ImageChops.multiply(layer.getchannel("A"),
-                                           self._card_pmask(key, g)))
-        img.paste(layer, (0, 0), layer)
 
     def _water(self, img, key, g: Geo, pct, theme):
         """Fill card ``g`` with liquid up to ``pct``%.
@@ -834,19 +748,6 @@ class Dashboard:
                                        max(-WATER_TILT, min(WATER_TILT, want)),
                                        WATER_SETTLE)
 
-        # card base rhythm: advance exactly *one* card's phase per step. Every
-        # card is still drawn each frame, but only one of them differs from the
-        # previous frame, so the transport only has to ship one card's tiles.
-        if c.card_glow:
-            tick = int(self.time * CARD_PULSE_HZ)
-            if tick != self._pulse_tick:
-                self._pulse_tick = tick
-                keys = list(self.cards)
-                if keys:
-                    k = keys[tick % len(keys)]
-                    self._pulse[k] = self._pulse.get(k, 0.0) + (
-                        len(keys) / CARD_PULSE_HZ)
-
         self._text_acc += dt
         if self._text_acc >= c.text_period:
             self._text_acc = 0.0
@@ -887,27 +788,8 @@ class Dashboard:
         gpu_col = hex_rgb(c.accent_gpu, ACCENT_VIOLET)
         mem_col = hex_rgb(c.accent_mem, ACCENT_CYAN)
         pwr_col = ramp(POWER_STOPS, self.v.power)
-        # the wash keeps the accent, but the power ramp is only followed in wide
-        # buckets: a tint that tracks the load continuously would re-paint the
-        # whole wash on every frame, and on a soft haze nobody can tell the
-        # buckets are there
-        pwr_tex = ramp(POWER_STOPS, 60.0 * round(self.v.power / 60.0))
 
         d = ImageDraw.Draw(img, "RGBA")
-
-        # the hazy base rhythm sits under the liquid, so the pool reads as a
-        # body of water with light moving through its backdrop. It is drawn in
-        # both modes: over the built-in gradient the card has a base of its own,
-        # and over a user backdrop the wash breathes on the picture itself --
-        # the card stays borderless and untinted apart from this haze.
-        if c.card_glow:
-            for i, (key, theme) in enumerate((("cpu", cpu_col), ("gpu", gpu_col),
-                                              ("mem", mem_col),
-                                              ("power", pwr_tex),
-                                              ("fps", ACCENT_GREEN))):
-                g = self.cards.get(key)
-                if g is not None:
-                    self._card_pulse(img, key, g, theme, i * 1.7)
 
         # the pools fill next; every readout is then drawn on top of them
         for key, pct, theme in (("cpu", self.bar["cpu"], cpu_col),
@@ -973,19 +855,6 @@ class Dashboard:
         cx, cy = TOP_BAR.x + TOP_BAR.w - 8, TOP_BAR.y + 8
         a = int(120 + 135 * (0.5 + 0.5 * math.sin(self.time * 2.4)))
         d.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), fill=ACCENT_GREEN + (a,))
-
-        sw = 60
-        sx = int((self.time * 55) % (TOP_BAR.w + sw * 2)) - sw
-        shine = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ImageDraw.Draw(shine).polygon(
-            [(sx, TOP_BAR.y + 2), (sx + 18, TOP_BAR.y + 2),
-             (sx - 8, TOP_BAR.y + TOP_BAR.h - 2), (sx - 26, TOP_BAR.y + TOP_BAR.h - 2)],
-            fill=(255, 255, 255, 18))
-        shine = shine.filter(ImageFilter.GaussianBlur(4))
-        top_mask = Image.new("L", (W, H), 0)
-        ImageDraw.Draw(top_mask).rectangle(TOP_BAR.box, fill=255)
-        img.paste(Image.alpha_composite(img.convert("RGBA"), shine).convert("RGB"),
-                  (0, 0), top_mask)
 
         return img
 

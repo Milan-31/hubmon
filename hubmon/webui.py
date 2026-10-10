@@ -145,10 +145,12 @@ SCHEMA = [
         ],
     },
     {
-        "title": "背景与动效",
+        "title": "背景",
         "icon": _ICON_BG,
         "rows": [
-            {"key": "card_glow", "label": "卡片底色律动", "type": "bool"},
+            {"key": "bg_color_top", "label": "顶部颜色", "type": "color"},
+            {"key": "bg_color_mid", "label": "中部颜色", "type": "color"},
+            {"key": "bg_color_bot", "label": "底部颜色", "type": "color"},
             {"key": "bg_image", "label": "背景图片", "type": "file"},
             {"key": "bg_image_blur", "label": "图片模糊", "type": "num",
              "min": 0, "max": 40, "step": 1, "unit": "px"},
@@ -448,14 +450,63 @@ _PAGE = r"""<!DOCTYPE html>
     box-shadow:0 2px 7px rgba(0,0,0,.5);
   }
 
-  /* ---- color ---- */
-  input[type=color]{
-    -webkit-appearance:none;appearance:none;width:28px;height:28px;padding:0;border:none;
-    border-radius:50%;background:none;cursor:pointer;
+  /* ---- colour: a swatch that opens an HSV picker popover ---- */
+  .swatch{
+    width:34px;height:34px;padding:0;border-radius:11px;cursor:pointer;
+    border:1px solid rgba(255,255,255,.22);background:none;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.30),0 2px 8px rgba(0,0,0,.45);
+    transition:transform .12s ease,box-shadow .16s ease;
   }
-  input[type=color]::-webkit-color-swatch-wrapper{padding:0}
-  input[type=color]::-webkit-color-swatch{border:1px solid rgba(255,255,255,.28);border-radius:50%}
-  input[type=color]::-moz-color-swatch{border:1px solid rgba(255,255,255,.28);border-radius:50%}
+  .swatch:hover{
+    transform:translateY(-1px);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.38),0 4px 12px rgba(0,0,0,.5);
+  }
+  .swatch i{display:block;width:100%;height:100%;border-radius:10px}
+  .hexval{
+    font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums;
+    letter-spacing:.3px;margin-right:11px;
+  }
+  .picker{
+    position:fixed;z-index:90;width:236px;padding:14px;display:none;
+    border-radius:16px;border:1px solid var(--card-line);
+    background:rgba(17,21,29,.94);backdrop-filter:blur(20px);
+    box-shadow:0 20px 48px rgba(0,0,0,.62),var(--hi);
+  }
+  .picker.open{display:block}
+  .picker-sv{
+    position:relative;height:130px;border-radius:11px;cursor:crosshair;
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.16);
+  }
+  .picker-dot{
+    position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;
+    border:2px solid #fff;pointer-events:none;
+    box-shadow:0 0 0 1px rgba(0,0,0,.45),0 1px 5px rgba(0,0,0,.6);
+  }
+  .picker-hue{
+    position:relative;height:13px;border-radius:7px;margin-top:12px;cursor:pointer;
+    background:linear-gradient(to right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00);
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.16);
+  }
+  .picker-hue i{
+    position:absolute;top:50%;width:17px;height:17px;margin:-8.5px 0 0 -8.5px;
+    border-radius:50%;background:#fff;pointer-events:none;
+    box-shadow:0 0 0 1px rgba(0,0,0,.35),0 1px 5px rgba(0,0,0,.6);
+  }
+  .picker-hex{
+    width:100%;margin-top:12px;font-family:var(--font);font-size:13.5px;
+    color:var(--text);background:rgba(0,0,0,.3);border:1px solid var(--card-line);
+    border-radius:9px;padding:8px 10px;outline:none;
+    font-variant-numeric:tabular-nums;letter-spacing:.4px;
+  }
+  .picker-hex:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(56,189,248,.18)}
+  .picker-presets{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}
+  .picker-presets button{
+    width:21px;height:21px;padding:0;border-radius:7px;cursor:pointer;
+    border:1px solid rgba(255,255,255,.2);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.28);
+    transition:transform .12s ease;
+  }
+  .picker-presets button:hover{transform:translateY(-1px)}
 
   /* ---- text / port ---- */
   input.input{
@@ -684,6 +735,163 @@ _PAGE = r"""<!DOCTYPE html>
     for(var i=0;i<rs.length;i++){ paintRange(rs[i]); }
   }
 
+  /* ---- colour picker: HSV square + hue rail inside a glass popover ----
+     One popover is shared by every colour row; opening it just re-points it
+     at another key. Colour maths is plain HSV <-> RGB so the square, the rail
+     and the hex field always agree. */
+  var PICK = {el:null, key:null, on:null, h:0, s:0, v:1};
+
+  var PRESETS = ['#0a0e16','#101522','#1c2333','#2a1f3d','#12262b','#3a1d1d',
+                 '#0b2436','#241a0f','#38bdf8','#a78bfa','#22d3ee','#fbbf24'];
+
+  function hsv2rgb(h, s, v){
+    var c = v * s, k = h / 60, x = c * (1 - Math.abs(k % 2 - 1)), m = v - c;
+    var r = 0, g = 0, b = 0;
+    if(k < 1){ r = c; g = x; }
+    else if(k < 2){ r = x; g = c; }
+    else if(k < 3){ g = c; b = x; }
+    else if(k < 4){ g = x; b = c; }
+    else if(k < 5){ r = x; b = c; }
+    else { r = c; b = x; }
+    return [Math.round((r + m) * 255), Math.round((g + m) * 255),
+            Math.round((b + m) * 255)];
+  }
+  function rgb2hex(r, g, b){
+    return '#' + [r, g, b].map(function(c){
+      var t = Math.max(0, Math.min(255, Math.round(c))).toString(16);
+      return t.length < 2 ? '0' + t : t;
+    }).join('');
+  }
+  function hex2rgb(s){
+    var h = String(s || '').trim().replace(/^#/, '');
+    if(h.length === 3){ h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2]; }
+    if(!/^[0-9a-f]{6}$/i.test(h)){ return null; }
+    return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16),
+            parseInt(h.slice(4,6),16)];
+  }
+  function rgb2hsv(r, g, b){
+    r /= 255; g /= 255; b /= 255;
+    var mx = Math.max(r,g,b), mn = Math.min(r,g,b), d = mx - mn, h = 0;
+    if(d){
+      h = mx === r ? ((g - b) / d + 6) % 6 : (mx === g ? (b - r) / d + 2 : (r - g) / d + 4);
+    }
+    return {h:h * 60, s:mx ? d / mx : 0, v:mx};
+  }
+  function pickerHex(){ return rgb2hex.apply(null, hsv2rgb(PICK.h, PICK.s, PICK.v)); }
+
+  function paintPicker(){
+    var p = PICK.el;
+    if(!p){ return; }
+    var base = rgb2hex.apply(null, hsv2rgb(PICK.h, 1, 1));
+    $('[data-sv]', p).style.background =
+      'linear-gradient(to top,#000,rgba(0,0,0,0)),' +
+      'linear-gradient(to right,#fff,rgba(255,255,255,0)),' + base;
+    $('[data-dot]', p).style.left = (PICK.s * 100) + '%';
+    $('[data-dot]', p).style.top = ((1 - PICK.v) * 100) + '%';
+    $('[data-hdot]', p).style.left = (PICK.h / 360 * 100) + '%';
+    var hx = $('[data-hex]', p);
+    if(document.activeElement !== hx){ hx.value = pickerHex(); }
+  }
+  function commitPicker(){
+    if(PICK.key === null){ return; }
+    CFG[PICK.key] = pickerHex();
+    if(PICK.on){ PICK.on(); }
+  }
+  function setPickerFromHex(hex){
+    var rgb = hex2rgb(hex);
+    if(!rgb){ return false; }
+    var c = rgb2hsv(rgb[0], rgb[1], rgb[2]);
+    PICK.h = c.h; PICK.s = c.s; PICK.v = c.v;
+    paintPicker(); commitPicker();
+    return true;
+  }
+  function buildPicker(){
+    var p = document.createElement('div');
+    p.className = 'picker';
+    p.innerHTML =
+      '<div class="picker-sv" data-sv><span class="picker-dot" data-dot></span></div>' +
+      '<div class="picker-hue" data-hue><i data-hdot></i></div>' +
+      '<input class="picker-hex" data-hex maxlength="7" spellcheck="false">' +
+      '<div class="picker-presets" data-presets></div>';
+    document.body.appendChild(p);
+    PICK.el = p;
+
+    function drag(e, fn){
+      fn(e);
+      function up(){
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        document.removeEventListener('touchmove', move);
+        document.removeEventListener('touchend', up);
+        /* a press that ends outside the popover still fires a click on body;
+           remember it so that click does not close the popover mid-drag */
+        PICK.dragEnd = Date.now();
+      }
+      function move(ev){ fn(ev); }
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+      document.addEventListener('touchmove', move, {passive:false});
+      document.addEventListener('touchend', up);
+    }
+    function svAt(e){
+      var t = e.touches ? e.touches[0] : e;
+      var r = $('[data-sv]', p).getBoundingClientRect();
+      PICK.s = Math.min(1, Math.max(0, (t.clientX - r.left) / r.width));
+      PICK.v = Math.min(1, Math.max(0, 1 - (t.clientY - r.top) / r.height));
+      paintPicker(); commitPicker();
+      if(e.cancelable){ e.preventDefault(); }
+    }
+    function hueAt(e){
+      var t = e.touches ? e.touches[0] : e;
+      var r = $('[data-hue]', p).getBoundingClientRect();
+      PICK.h = Math.min(360, Math.max(0, (t.clientX - r.left) / r.width * 360));
+      paintPicker(); commitPicker();
+      if(e.cancelable){ e.preventDefault(); }
+    }
+    var sv = $('[data-sv]', p), hue = $('[data-hue]', p);
+    sv.addEventListener('mousedown', function(e){ drag(e, svAt); });
+    sv.addEventListener('touchstart', function(e){ drag(e, svAt); }, {passive:false});
+    hue.addEventListener('mousedown', function(e){ drag(e, hueAt); });
+    hue.addEventListener('touchstart', function(e){ drag(e, hueAt); }, {passive:false});
+    $('[data-hex]', p).addEventListener('input', function(){
+      setPickerFromHex($('[data-hex]', p).value);
+    });
+    var box = $('[data-presets]', p);
+    PRESETS.forEach(function(c){
+      var b = document.createElement('button');
+      b.type = 'button'; b.style.background = c; b.title = c;
+      b.addEventListener('click', function(){ setPickerFromHex(c); });
+      box.appendChild(b);
+    });
+    p.addEventListener('click', function(e){ e.stopPropagation(); });
+    return p;
+  }
+  function openPicker(key, on, anchor){
+    var p = PICK.el || buildPicker();
+    PICK.key = key; PICK.on = on;
+    var rgb = hex2rgb(CFG[key]) || [255, 255, 255];
+    var c = rgb2hsv(rgb[0], rgb[1], rgb[2]);
+    PICK.h = c.h; PICK.s = c.s; PICK.v = c.v;
+    paintPicker();
+    p.classList.add('open');
+    var r = anchor.getBoundingClientRect();
+    var w = p.offsetWidth, h = p.offsetHeight;
+    p.style.left = Math.min(Math.max(8, r.right - w),
+                            window.innerWidth - w - 8) + 'px';
+    p.style.top = Math.min(Math.max(8, r.bottom + 10),
+                           window.innerHeight - h - 8) + 'px';
+  }
+  function closePicker(){
+    if(PICK.el){ PICK.el.classList.remove('open'); }
+    PICK.key = null;
+  }
+  document.addEventListener('click', function(){
+    /* a click that lands right after a picker drag is the tail of that drag,
+       not a click-away -- ignore it so the popover survives */
+    if(Date.now() - (PICK.dragEnd || 0) < 400){ return; }
+    closePicker();
+  });
+
   function buildRow(row){
     var el, input;
     if(row.type === 'bool'){
@@ -722,10 +930,21 @@ _PAGE = r"""<!DOCTYPE html>
       el = document.createElement('div');
       el.className = 'row';
       el.innerHTML = '<span class="label">' + esc(row.label) + '</span>' +
-        '<div class="spacer"></div><input type="color">';
-      input = $('input', el);
-      input.value = CFG[row.key] || '#ffffff';
-      input.addEventListener('input', function(){ CFG[row.key] = input.value; });
+        '<div class="spacer"></div>' +
+        '<span class="hexval" data-hexval></span>' +
+        '<button class="swatch" type="button" data-sw><i></i></button>';
+      var sw = $('[data-sw]', el), chip = $('i', el);
+      var hexv = $('[data-hexval]', el);
+      var repaint = function(){
+        var c = String(CFG[row.key] || '#ffffff').toLowerCase();
+        chip.style.background = c;
+        hexv.textContent = c;
+      };
+      sw.addEventListener('click', function(e){
+        e.stopPropagation();            /* keep the document handler from closing */
+        openPicker(row.key, repaint, sw);
+      });
+      repaint();
       return el;
     }
     if(row.type === 'file'){
@@ -780,7 +999,7 @@ _PAGE = r"""<!DOCTYPE html>
       }
       function show(){
         var p = CFG[row.key] || '';
-        pathEl.textContent = p || '未选择 · 使用内置渐变背景';
+        pathEl.textContent = p || '未选择 · 使用上方自定渐变';
         pathEl.title = p;
         pathEl.classList.toggle('empty', !p);
         clearBtn.disabled = !p;
@@ -841,7 +1060,13 @@ _PAGE = r"""<!DOCTYPE html>
           .then(function(r){ return r.json(); })
           .then(function(d){
             if(d && d.ok && d.path){
-              CFG[row.key] = d.path; show(); toast('已选择，保存后生效');
+              CFG[row.key] = d.path;
+              /* the crop preview is streamed from the server's config, so the
+                 pick has to be applied before the new file can be framed --
+                 without this the preview keeps serving the previous image (or
+                 a 404) and the widget only works after a manual save + reload */
+              applyCfg().then(show, show);
+              toast('已选择并应用');
             } else if(d && d.cancelled){
               toast('已取消');
             } else {
@@ -971,26 +1196,34 @@ _PAGE = r"""<!DOCTYPE html>
       .catch(function(){});
   }
 
-  function save(){
-    var btn = $('#save');
-    btn.disabled = true;
-    var label = btn.textContent;
-    fetch('/api/config', {
+  /* Push the whole panel state to the server. The render loop reads the server
+     config live, so this is both "make it take effect on the screen" and what
+     lets /api/bg-image serve a file the panel has just chosen. */
+  function applyCfg(){
+    return fetch('/api/config', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify(CFG)
     }).then(function(r){ return r.json(); })
       .then(function(d){
-        if(d && d.ok){
-          if(d.config){ CFG = d.config; }
-          btn.textContent = '已保存';
-          toast('设置已保存');
-          setTimeout(function(){ btn.textContent = label; }, 1200);
-        } else {
-          toast('保存失败');
-        }
-      })
-      .catch(function(){ toast('保存失败'); })
+        if(d && d.ok && d.config){ CFG = d.config; }
+        return !!(d && d.ok);
+      });
+  }
+
+  function save(){
+    var btn = $('#save');
+    btn.disabled = true;
+    var label = btn.textContent;
+    applyCfg().then(function(ok){
+      if(ok){
+        btn.textContent = '已保存';
+        toast('设置已保存');
+        setTimeout(function(){ btn.textContent = label; }, 1200);
+      } else {
+        toast('保存失败');
+      }
+    }).catch(function(){ toast('保存失败'); })
       .then(function(){ btn.disabled = false; });
   }
 
@@ -1014,6 +1247,9 @@ _PAGE = r"""<!DOCTYPE html>
     poll();
     setInterval(poll, 1000);
     window.addEventListener('resize', repaintRanges);
+    /* the popover is anchored to the viewport, so a scroll would leave it
+       floating away from its swatch -- close it instead */
+    $('#content').addEventListener('scroll', closePicker);
     $('#save').addEventListener('click', save);
     $('#reset').addEventListener('click', reset);
     $('#quit').addEventListener('click', quit);

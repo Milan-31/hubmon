@@ -30,9 +30,11 @@ class Config:
     roll: bool = True            # glyph slot-roll when a value changes
     roll_speed: float = 3.2      # rolls per second
 
-    # ---- animated backdrop -------------------------------------------------
-    card_glow: bool = True       # hazy accent rhythm breathing inside each card
-    bg_image: str = ""           # custom backdrop image; "" = built-in gradient
+    # ---- backdrop ----------------------------------------------------------
+    bg_color_top: str = "#0a0e16"    # three-stop vertical gradient, user-picked
+    bg_color_mid: str = "#0d121c"
+    bg_color_bot: str = "#101522"
+    bg_image: str = ""           # custom backdrop image; "" = the gradient above
     bg_image_blur: float = 8.0   # Gaussian blur radius applied to that image, px
     bg_image_brightness: float = 1.0
     bg_image_zoom: float = 1.0   # 1 = cover, up to 4 = cropped in
