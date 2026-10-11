@@ -166,6 +166,18 @@ def core_label(cores, threads):
     return "—"
 
 
+def ink_mid(font, text, top, bot):
+    """Draw origin that centres ``text``'s ink box within the band top..bot.
+
+    The top bar is a plate with a bevelled edge, so what matters is where the
+    glyph *ink* lands, not where the em box does -- Segoe UI reserves room above
+    the digits that the clock does not use, which is what pushed the readout
+    onto the frame.
+    """
+    b = font.getbbox(text or "0")
+    return top + (bot - top - max(1, b[3] - b[1])) / 2.0 - b[1]
+
+
 # ------------------------------------------------------------ part naming ----
 # The panel is 320 px wide, so a full marketing name ("12th Gen Intel(R) Core(TM)
 # i5-12400F") cannot be shown; these pull the model out of it instead.
@@ -199,6 +211,43 @@ def short_gpu(name: str) -> str:
         return ""
     s = name
     for t in _GPU_NOISE:
+        s = s.replace(t, " ")
+    return re.sub(r"\s+", " ", s).strip(" -")
+
+
+# The panel shows the chipset rather than the whole board name ("Z690M Snow
+# Dream" -> "Z690"), because the chipset is the part that means anything at a
+# glance. Longer variants are listed first so the alternation matches 'B650E'
+# before it can settle for 'B650'.
+_CHIPSETS = (
+    # AMD
+    "TRX50", "TRX40", "WRX90", "WRX80",
+    "X870E", "X870", "X670E", "X670", "B850", "B840", "B650E", "B650",
+    "A620", "X570", "B550", "A520", "X470", "B450", "X370", "B350", "A320",
+    # Intel
+    "Z890", "B860", "H810", "Z790", "Z690", "W680", "H770", "B760", "H670",
+    "B660", "H610", "Z590", "H570", "B560", "H510", "Z490", "B460", "H410",
+    "Z390", "B365", "B360", "H370", "H310", "Z370", "X299", "Z270", "B250",
+    "H270", "Z170", "B150", "H110",
+)
+_CHIPSET_RX = re.compile("|".join(_CHIPSETS), re.I)
+_BOARD_NOISE = ("Motherboard", "Mainboard", "Corporation", "Inc.", "Co., Ltd.",
+                "(R)", "(TM)")
+
+
+def short_board(name: str) -> str:
+    """Chipset from a board product string, e.g. 'Z690M Snow Dream' -> 'Z690'.
+
+    Falls back to the cleaned-up board name when no known chipset is in it --
+    an unfamiliar board is still more use than a blank corner.
+    """
+    if not name:
+        return ""
+    m = _CHIPSET_RX.search(name)
+    if m:
+        return m.group(0).upper()
+    s = name
+    for t in _BOARD_NOISE:
         s = s.replace(t, " ")
     return re.sub(r"\s+", " ", s).strip(" -")
 
@@ -303,29 +352,28 @@ class RollText:
 
 # ------------------------------------------------------- quartz numerals -----
 def _seg_bars(x, y, w, h, t):
-    """The seven bevelled bars of one digit, in panel pixels.
+    """The seven bars of one digit, in panel pixels.
 
     ``w``/``h`` are the cell, ``t`` the bar thickness. Horizontal bars span the
-    full cell so the corners miter against the verticals, and consecutive bars
-    are held apart by a small gap -- together those two things are the whole
-    difference between a segment display and seven rectangles. The end taper is
-    capped at 30% of a bar's own length, which keeps a short vertical bar from
-    collapsing into a bow tie.
+    full cell so they mitre into the verticals; a small gap separates bars that
+    meet. The end taper is capped at 22% of a bar's own length, and modestly --
+    a vertical bar is only about twice its own thickness long, so a 45-degree
+    taper would eat it down to a blob and the digit would stop reading.
     """
     p = t / 2.0
-    gap = t * 0.16
+    gap = t * 0.12
     ca, cg, cd = y + p, y + h / 2.0, y + h - p
     xl, xr = x + p, x + w - p
     ya0, ya1 = ca + p + gap, cg - p - gap
     yb0, yb1 = cg + p + gap, cd - p - gap
 
     def hseg(x0, x1, cy):
-        b = min(p, (x1 - x0) * 0.30)
+        b = min(p, (x1 - x0) * 0.22)
         return ((x0 + b, cy - p), (x1 - b, cy - p), (x1, cy),
                 (x1 - b, cy + p), (x0 + b, cy + p), (x0, cy))
 
     def vseg(cx, y0, y1):
-        b = min(p, (y1 - y0) * 0.30)
+        b = min(p, (y1 - y0) * 0.22)
         return ((cx, y0), (cx + p, y0 + b), (cx + p, y1 - b), (cx, y1),
                 (cx - p, y1 - b), (cx - p, y0 + b))
 
@@ -352,6 +400,7 @@ class SegText:
            "9": "abcdfg", "-": "g", "_": "d", " ": ""}
     EXTRA = (".", "%")          # drawn, not in the seven bars
     SS = 4
+    GHOST = 0.13                # alpha of the bars that are not lit
 
     def __init__(self, font, color, accent, speed=3.2):
         self.font = font
@@ -362,7 +411,8 @@ class SegText:
         self.t = 1.0
         self.speed = speed
         self.enabled = True
-        self._mcache = {}           # text -> rasterised tile (see _tile)
+        self._mcache = {}           # (text, dim) -> rasterised tile (see _tile)
+        self._lcache = {}           # text -> lit+ghost composite (see _lit)
 
     def set(self, text):
         text = str(text)
@@ -391,11 +441,19 @@ class SegText:
         return m
 
     def _cell(self):
-        """(height, width, thickness, advance gap) of one digit cell, in px."""
-        ink_h = float(self._ink()[1])
-        t = max(2.2, ink_h * 0.135)     # floor: RGB565 eats anything thinner
-        w = max(ink_h * 0.46, t * 3.6)
-        return ink_h, w, t, t * 1.25
+        """(height, width, thickness, advance gap) of one digit cell, in px.
+
+        The cell is 3px taller than the vector face's ink, so the bars use the
+        full height of the band the rolled glyphs would have filled; the advance
+        comes out within a pixel of the vector face's, which is what keeps the
+        layout from shifting when the style is switched. The bar runs at about
+        an eighth of the cell -- thick enough to survive RGB565 quantisation on
+        a 320px panel, where anything near two pixels greys out and blurs.
+        """
+        h = float(self._ink()[1]) + 3.0
+        t = h * 0.127
+        w = h * 0.55
+        return h, w, t, t * 1.15
 
     def _adv(self, ch):
         _, w, _, gap = self._cell()
@@ -445,25 +503,64 @@ class SegText:
             cx += self._adv(ch)
         return m.resize((tw, th), Image.LANCZOS)
 
-    def _tile(self, text, w, h, t, tw, th, pad):
+    def _eights(self, text):
+        """``text`` with every seven-bar glyph turned into a full '8'."""
+        return "".join("8" if ch in self.SEG else ch for ch in text)
+
+    def _tile(self, text, w, h, t, tw, th, pad, dim=1.0):
         """Rasterised coverage for one string, memoised.
 
-        The mask depends only on the string, so the steady state (a value that
-        is not changing) costs one dict lookup instead of a fresh 4x pass --
-        and the CPU render is already half this pipeline's frame budget.
+        The mask depends only on the string (and the dimming), so the steady
+        state -- a value that is not changing -- costs one dict lookup instead
+        of a fresh 4x pass, and the CPU render is already half this pipeline's
+        frame budget. Different dims are different keys because a ghost tile is
+        the same geometry at low alpha, not a second rasterisation.
         """
-        got = self._mcache.get(text)
+        key = (text, dim)
+        got = self._mcache.get(key)
         if got is None or got[1] != (tw, th):
-            got = (self._mask(text, w, h, t, tw, th, pad), (tw, th))
-            if len(self._mcache) > 12:
+            m = self._mask(text, w, h, t, tw, th, pad)
+            if dim < 1.0:
+                m = m.point([int(v * dim) for v in range(256)])
+            got = (m, (tw, th))
+            if len(self._mcache) > 24:
                 self._mcache.clear()
-            self._mcache[text] = got
+            self._mcache[key] = got
+        return got[0]
+
+    def _ghost(self, text, w, h, t, tw, th, pad):
+        """The unlit bars of ``text``: every segment an '8' would use, faint.
+
+        A real quartz display always has its dark bars visible, and drawing them
+        is what makes the lit ones read as a display rather than as free-floating
+        strokes -- it also gives the eye the digit's full frame, so a '1' or a
+        '7' is not just a couple of bright lines in the dark.
+        """
+        return self._tile(self._eights(text), w, h, t, tw, th, pad, self.GHOST)
+
+    def _lit(self, text, w, h, t, tw, th, pad):
+        """A settled digit: the lit bars over the ghost of the unlit ones.
+
+        Composite memoised, because that union is what every frame of the steady
+        state wants; redoing the ``lighter`` per numeral per frame costs more
+        than the whole rest of the numeral draw.
+        """
+        got = self._lcache.get(text)
+        if got is None or got[1] != (tw, th):
+            got = (ImageChops.lighter(self._ghost(text, w, h, t, tw, th, pad),
+                                      self._tile(text, w, h, t, tw, th, pad)),
+                   (tw, th))
+            if len(self._lcache) > 24:
+                self._lcache.clear()
+            self._lcache[text] = got
         return got[0]
 
     def draw(self, img, x, y):
         h, w, t, gap = self._cell()
         pad = 3
-        left, top = int(x) - pad, int(y + self._ink()[0]) - pad
+        # the cell tops out 3px above the vector ink and lands on the same
+        # baseline, so swapping styles does not move the number
+        left, top = int(x) - pad, int(y + self._ink()[0] - 3.0) - pad
         col = self.color
 
         # anything the bars cannot express stays in the vector face; such glyphs
@@ -479,12 +576,19 @@ class SegText:
                                self._width(self.prev)))) + pad * 2
         th = int(math.ceil(h)) + pad * 2
         if self.t >= 1.0 or self.prev == self.text:
-            mask = self._tile(self.text, w, h, t, tw, th, pad)
+            mask = self._lit(self.text, w, h, t, tw, th, pad)
         else:
+            # roll: fade the outgoing bars into the incoming ones, then lay the
+            # ghost back over both. Doing it in that order keeps the ghost out
+            # of the cross-fade, so a rolling digit repaints only its bars.
             p = self.t * self.t * (3 - 2 * self.t)      # smoothstep
             col = mix(self.color, self.accent, 0.7 * math.sin(math.pi * self.t))
-            mask = Image.blend(self._tile(self.prev, w, h, t, tw, th, pad),
-                               self._tile(self.text, w, h, t, tw, th, pad), p)
+            lit = Image.blend(self._tile(self.prev, w, h, t, tw, th, pad),
+                              self._tile(self.text, w, h, t, tw, th, pad), p)
+            mask = ImageChops.lighter(
+                ImageChops.lighter(self._ghost(self.prev, w, h, t, tw, th, pad),
+                                   self._ghost(self.text, w, h, t, tw, th, pad)),
+                lit)
 
         layer = Image.new("RGBA", (tw, th), col + (255,))
         layer.putalpha(mask)
@@ -515,6 +619,7 @@ class Vals:
     gpu_name: str = ""
     fg_app: str = ""
     host: str = ""
+    board: str = ""
 
 
 # key -> (label, accent field)
@@ -555,6 +660,7 @@ class Dashboard:
         self._tilt = {}
         self._tick = -1
         self._cores = "—"
+        self._board = ""
         self._bg_key = None
         self._bg_img = None
         self._plain = False     # True while a user backdrop replaces the chrome
@@ -665,6 +771,7 @@ class Dashboard:
         t.gpu_name = stats.get("gpu_name", "")
         t.fg_app = stats.get("fg_app", "")
         t.host = stats.get("host", "")
+        t.board = stats.get("board_name", "")
 
     # ---------------------------------------------------------------- static
     def _load_bg_image(self, path):
@@ -1038,6 +1145,7 @@ class Dashboard:
         self.v.gpu_name = self.tgt.gpu_name
         self.v.fg_app = self.tgt.fg_app
         self.v.host = self.tgt.host
+        self.v.board = self.tgt.board
         self.v.cpu_cores = self.tgt.cpu_cores
         self.v.cpu_threads = self.tgt.cpu_threads
 
@@ -1103,6 +1211,7 @@ class Dashboard:
         self.num_pwr.set(f"{v.power:.0f}")
         self._cpu_short = short_cpu(v.cpu_name)
         self._gpu_short = short_gpu(v.gpu_name)
+        self._board = short_board(v.board)
         self._cores = core_label(v.cpu_cores, v.cpu_threads)
 
     # ---------------------------------------------------------------- render
@@ -1169,19 +1278,29 @@ class Dashboard:
             d.text((g.x + PAD, g.y + 41), app, font=self._f_app, fill=TEXT_DIM,
                    stroke_width=1, stroke_fill=TEXT_SHADOW)
 
-        d.text((TOP_BAR.x + 2, TOP_BAR.y + 2), self.v.host or "PC", font=self._f_host,
-               fill=TEXT)
+        # the top bar is a plate in the quartz face and bare backdrop in glass,
+        # so the band the text must stay inside is inset by the plate's bezel
+        bo = PLATE_BEZEL if c.style == "quartz" else 0
+        wtop, wbot = TOP_BAR.y + bo, TOP_BAR.y + TOP_BAR.h - bo
+        # left corner carries the chipset -- the one part of the board name that
+        # means anything at a glance -- falling back to the machine name
+        left_txt = self._board or self.v.host or "PC"
+        d.text((TOP_BAR.x + 2, ink_mid(self._f_host, left_txt, wtop, wbot)),
+               left_txt, font=self._f_host, fill=TEXT)
+
         self.clock = time.strftime("%H:%M:%S")
         cw = self._f_clock.getlength(self.clock)
-        d.text((TOP_BAR.x + TOP_BAR.w - cw - 14, TOP_BAR.y + 1), self.clock,
-               font=self._f_clock, fill=TEXT)
+        d.text((TOP_BAR.x + TOP_BAR.w - cw - 14,
+                ink_mid(self._f_clock, self.clock, wtop, wbot)),
+               self.clock, font=self._f_clock, fill=TEXT)
 
-        hw = self._f_host.getlength(self.v.host or "PC")
+        hw = self._f_host.getlength(left_txt)
         left = TOP_BAR.x + 6 + hw
         right = TOP_BAR.x + TOP_BAR.w - cw - 18
         net = fit(f"↓{rate(self.v.net_down)}/s ↑{rate(self.v.net_up)}/s",
                   self._f_net, right - left)
-        d.text(((left + right - self._f_net.getlength(net)) / 2.0, TOP_BAR.y + 2),
+        d.text(((left + right - self._f_net.getlength(net)) / 2.0,
+                ink_mid(self._f_net, net, wtop, wbot)),
                net, font=self._f_net, fill=TEXT_DIM)
         cx, cy = TOP_BAR.x + TOP_BAR.w - 8, TOP_BAR.y + 8
         a = int(120 + 135 * (0.5 + 0.5 * math.sin(self.time * 2.4)))

@@ -88,7 +88,7 @@ class Demo:
             mem_used_gb=16.4, mem_total_gb=34.2, cpu_perf=100 + 0.9 * cpu,
             cpu_name="12th Gen Intel(R) Core(TM) i5-12400F", gpu_name="RTX 5060",
             fg_app="GameViewer.exe", fg_fps=138 + 12 * math.sin(t * 0.9),
-            host="MILAN")
+            host="MILAN", board_name="Z690M Snow Dream")
 
 
 def run_preview(cfg, outdir, frames, fps):

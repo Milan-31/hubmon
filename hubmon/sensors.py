@@ -113,6 +113,31 @@ def _cpu_name():
         return platform.processor() or "CPU"
 
 
+def _board_name():
+    """Motherboard product string, e.g. 'Z690M Snow Dream'.
+
+    Read from the BIOS key in the registry rather than through WMI: same data,
+    no helper process, no COM, and it is a single key lookup at startup. Boards
+    that never had their DMI strings filled in are reported as blank so the
+    caller can fall back instead of showing 'To be filled by O.E.M.'.
+    """
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                           r"HARDWARE\DESCRIPTION\System\BIOS")
+        for value in ("BaseBoardProduct", "SystemProductName"):
+            try:
+                s = winreg.QueryValueEx(k, value)[0].strip()
+            except OSError:
+                continue
+            up = s.upper()
+            if s and "O.E.M" not in up and "TO BE FILLED" not in up:
+                return s
+    except Exception:
+        pass
+    return ""
+
+
 def _foreground():
     """(exe name, pid) of the window that currently owns the foreground."""
     try:
@@ -251,6 +276,7 @@ class Sensors:
             pass
         self._cpu = _cpu_name()
         self._host = socket.gethostname()
+        self._board = _board_name()
         self._gpu_name = ""
         self._fg = ForegroundFps(presentmon_path)
         self._net = None
@@ -326,6 +352,7 @@ class Sensors:
                 "total_power_w": total,
                 "cpu_name": self._cpu,
                 "host": self._host,
+                "board_name": self._board,
                 "fg_app": fg_app,
                 "fg_fps": fg_fps,
                 **gpu,
