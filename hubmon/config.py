@@ -42,6 +42,7 @@ class Config:
     bg_image_offset_y: float = 0.0
 
     # ---- look --------------------------------------------------------------
+    style: str = "glass"         # "glass" rounded glassmorphism | "quartz"
     brightness: float = 1.0
     bg_brightness: float = 0.6   # backdrop dimmer, independent of UI brightness
     saturation: float = 1.0

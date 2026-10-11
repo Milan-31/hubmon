@@ -96,6 +96,12 @@ _ICON_TEXT = (
     'stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5h16v2"/>'
     '<path d="M12 5v14"/><path d="M9 19h6"/></svg>'
 )
+_ICON_STYLE = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" '
+    'stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 19.4 15.4 8.6"/>'
+    '<path d="m15.3 3.4.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9.9-2.4Z"/>'
+    '<path d="m8.1 3.2.5 1.4 1.4.5-1.4.5-.5 1.4-.5-1.4L6.2 5.1l1.4-.5.5-1.4Z"/></svg>'
+)
 _ICON_BG = (
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" '
     'stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z"/>'
@@ -122,6 +128,14 @@ _ICON_TOOL = (
 )
 
 SCHEMA = [
+    {
+        "title": "风格",
+        "icon": _ICON_STYLE,
+        "rows": [
+            {"key": "style", "label": "界面风格", "type": "enum",
+             "options": [["glass", "玻璃拟态"], ["quartz", "石英电子"]]},
+        ],
+    },
     {
         "title": "推流",
         "icon": _ICON_STREAM,
@@ -449,6 +463,24 @@ _PAGE = r"""<!DOCTYPE html>
     background:radial-gradient(circle at 50% 32%,#ffffff,#e8f3ff 68%,#d8e9fb);
     box-shadow:0 2px 7px rgba(0,0,0,.5);
   }
+
+  /* ---- segmented control: capsule buttons in a sunken track ---- */
+  .seg{
+    display:inline-flex;gap:3px;padding:3px;border-radius:999px;flex:0 0 auto;
+    background:rgba(0,0,0,.30);box-shadow:inset 0 1px 2px rgba(0,0,0,.34);
+  }
+  .seg-btn{
+    font-family:var(--font);font-size:13px;font-weight:560;color:var(--muted);
+    padding:6px 15px;border:none;border-radius:999px;cursor:pointer;
+    background:transparent;white-space:nowrap;
+    transition:color .2s,background .25s,box-shadow .25s;
+  }
+  .seg-btn:hover{color:var(--text)}
+  .seg-btn.on{
+    color:#f4fbff;background:linear-gradient(135deg,#38bdf8,#0ea5e9);
+    box-shadow:0 2px 8px rgba(56,189,248,.35),inset 0 1px 0 rgba(255,255,255,.28);
+  }
+  .seg-btn:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(56,189,248,.30)}
 
   /* ---- colour: a swatch that opens an HSV picker popover ---- */
   .swatch{
@@ -924,6 +956,36 @@ _PAGE = r"""<!DOCTYPE html>
         CFG[row.key] = Number(input.value); upd();
       });
       upd();
+      return el;
+    }
+    if(row.type === 'enum'){
+      el = document.createElement('div');
+      el.className = 'row';
+      el.innerHTML = '<span class="label">' + esc(row.label) + '</span>' +
+        '<div class="spacer"></div><div class="seg" data-seg></div>';
+      var seg = $('[data-seg]', el);
+      var paint = function(){
+        var cur = String(CFG[row.key] || '');
+        Array.prototype.forEach.call(seg.children, function(b){
+          b.classList.toggle('on', b.getAttribute('data-val') === cur);
+        });
+      };
+      (row.options || []).forEach(function(opt){
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'seg-btn';
+        b.setAttribute('data-val', opt[0]);
+        b.textContent = opt[1];
+        b.addEventListener('click', function(){
+          CFG[row.key] = opt[0];
+          paint();
+          /* a style swap re-bakes the whole chrome, so land it now instead of
+             making the switch wait for the next save */
+          applyCfg();
+        });
+        seg.appendChild(b);
+      });
+      paint();
       return el;
     }
     if(row.type === 'color'){

@@ -14,6 +14,9 @@ Design notes
   backdrop is a vertical gradient whose stops the user picks.
 * Numbers roll into place like a slot reel when they change (the panel now runs
   at tens of frames per second, so the motion reads properly).
+* The chrome comes in two faces, picked from the panel: the default rounded
+  glass, and a quartz face -- square-cornered neumorphic slabs with seven-bar
+  watch numerals. Only the furniture changes; the data never does.
 """
 from __future__ import annotations
 
@@ -285,6 +288,196 @@ class RollText:
             cx += cw
 
 
+# ------------------------------------------------------- quartz numerals -----
+def _seg_bars(x, y, w, h, t):
+    """The seven bevelled bars of one digit, in panel pixels.
+
+    ``w``/``h`` are the cell, ``t`` the bar thickness. Horizontal bars span the
+    full cell so the corners miter against the verticals, and consecutive bars
+    are held apart by a small gap -- together those two things are the whole
+    difference between a segment display and seven rectangles. The end taper is
+    capped at 30% of a bar's own length, which keeps a short vertical bar from
+    collapsing into a bow tie.
+    """
+    p = t / 2.0
+    gap = t * 0.16
+    ca, cg, cd = y + p, y + h / 2.0, y + h - p
+    xl, xr = x + p, x + w - p
+    ya0, ya1 = ca + p + gap, cg - p - gap
+    yb0, yb1 = cg + p + gap, cd - p - gap
+
+    def hseg(x0, x1, cy):
+        b = min(p, (x1 - x0) * 0.30)
+        return ((x0 + b, cy - p), (x1 - b, cy - p), (x1, cy),
+                (x1 - b, cy + p), (x0 + b, cy + p), (x0, cy))
+
+    def vseg(cx, y0, y1):
+        b = min(p, (y1 - y0) * 0.30)
+        return ((cx, y0), (cx + p, y0 + b), (cx + p, y1 - b), (cx, y1),
+                (cx - p, y1 - b), (cx - p, y0 + b))
+
+    return {"a": hseg(x, x + w, ca), "g": hseg(x, x + w, cg),
+            "d": hseg(x, x + w, cd),
+            "f": vseg(xl, ya0, ya1), "b": vseg(xr, ya0, ya1),
+            "e": vseg(xl, yb0, yb1), "c": vseg(xr, yb0, yb1)}
+
+
+class SegText:
+    """Quartz-watch numerals: seven lit bars per digit.
+
+    Drop-in for RollText (same set/step/width/draw surface) so the dashboard can
+    pick a face from config. A change cross-fades the outgoing digit's bars into
+    the incoming ones -- the electronic-display reading of the slot roll, and it
+    still touches only the glyph that changed.
+
+    The face is rasterised at 4x and reduced: the panel quantises to RGB565, and
+    a sub-pixel 45-degree bevel drawn at 1x turns into a staircase.
+    """
+
+    SEG = {"0": "abcdef", "1": "bc", "2": "abged", "3": "abgcd", "4": "fgbc",
+           "5": "afgcd", "6": "afgedc", "7": "abc", "8": "abcdefg",
+           "9": "abcdfg", "-": "g", "_": "d", " ": ""}
+    EXTRA = (".", "%")          # drawn, not in the seven bars
+    SS = 4
+
+    def __init__(self, font, color, accent, speed=3.2):
+        self.font = font
+        self.color = color
+        self.accent = accent
+        self.text = ""
+        self.prev = ""
+        self.t = 1.0
+        self.speed = speed
+        self.enabled = True
+        self._mcache = {}           # text -> rasterised tile (see _tile)
+
+    def set(self, text):
+        text = str(text)
+        if text == self.text:
+            return
+        if len(text) == len(self.text):
+            self.prev = self.text
+        else:                       # keep digit columns aligned from the right
+            n = len(text)
+            self.prev = self.text.rjust(n) if len(self.text) < n else self.text[-n:]
+        self.text = text
+        self.t = 0.0 if self.enabled else 1.0
+
+    def step(self, dt):
+        if self.t < 1.0:
+            self.t = min(1.0, self.t + dt * self.speed)
+
+    def _ink(self):
+        """(ink_top, ink_height) of the vector face, so the bars land in exactly
+        the band the rolled glyphs would have occupied."""
+        m = getattr(self, "_ink_m", None)
+        if m is None:
+            b = self.font.getbbox("0123456789")
+            m = (b[1], max(1, b[3] - b[1]))
+            self._ink_m = m
+        return m
+
+    def _cell(self):
+        """(height, width, thickness, advance gap) of one digit cell, in px."""
+        ink_h = float(self._ink()[1])
+        t = max(2.2, ink_h * 0.135)     # floor: RGB565 eats anything thinner
+        w = max(ink_h * 0.46, t * 3.6)
+        return ink_h, w, t, t * 1.25
+
+    def _adv(self, ch):
+        _, w, _, gap = self._cell()
+        if ch == ".":
+            return w * 0.40
+        if ch in self.SEG or ch == "%":
+            return w + gap
+        return self.font.getlength(ch)  # anything else: the vector face keeps it
+
+    def _width(self, text):
+        return sum(self._adv(c) for c in text)
+
+    def width(self):
+        return self._width(self.text)
+
+    def _mask(self, text, w, h, t, tw, th, pad):
+        """Coverage mask for one string, with the tile origin at (pad, pad)."""
+        s = self.SS
+        m = Image.new("L", (tw * s, th * s), 0)
+        md = ImageDraw.Draw(m)
+        cx = float(pad)
+        for ch in text:
+            if ch in self.SEG:
+                on = self.SEG[ch]
+                bars = _seg_bars(cx * s, pad * s, w * s, h * s, t * s)
+                for name, poly in bars.items():
+                    if name in on:
+                        md.polygon(poly, fill=255)
+            elif ch == ".":
+                r = t * 0.45
+                cy = pad + h - r
+                x0 = cx + w * 0.05
+                md.ellipse(((x0 - r) * s, (cy - r) * s,
+                            (x0 + r) * s, (cy + r) * s), fill=255)
+            elif ch == "%":
+                # a real segment display has no percent bar, so it is drawn as
+                # the printed symbol would be: two dots and a slash
+                r, q = t * 0.42, t * 0.30
+                c0x, c1x = cx + r * 1.15, cx + w - r * 1.15
+                c0y, c1y = pad + r * 1.15, pad + h - r * 1.15
+                for dx, dy in ((c0x, c0y), (c1x, c1y)):
+                    md.ellipse(((dx - r) * s, (dy - r) * s,
+                                (dx + r) * s, (dy + r) * s), fill=255)
+                md.polygon(((c0x * s, c1y * s), ((c0x + 2 * q) * s, c1y * s),
+                            (c1x * s, c0y * s), ((c1x - 2 * q) * s, c0y * s)),
+                           fill=255)
+            cx += self._adv(ch)
+        return m.resize((tw, th), Image.LANCZOS)
+
+    def _tile(self, text, w, h, t, tw, th, pad):
+        """Rasterised coverage for one string, memoised.
+
+        The mask depends only on the string, so the steady state (a value that
+        is not changing) costs one dict lookup instead of a fresh 4x pass --
+        and the CPU render is already half this pipeline's frame budget.
+        """
+        got = self._mcache.get(text)
+        if got is None or got[1] != (tw, th):
+            got = (self._mask(text, w, h, t, tw, th, pad), (tw, th))
+            if len(self._mcache) > 12:
+                self._mcache.clear()
+            self._mcache[text] = got
+        return got[0]
+
+    def draw(self, img, x, y):
+        h, w, t, gap = self._cell()
+        pad = 3
+        left, top = int(x) - pad, int(y + self._ink()[0]) - pad
+        col = self.color
+
+        # anything the bars cannot express stays in the vector face; such glyphs
+        # never change, so they are drawn flat and never animated
+        d = ImageDraw.Draw(img)
+        cx = float(x)
+        for ch in self.text:
+            if ch not in self.SEG and ch not in self.EXTRA:
+                d.text((cx, y), ch, font=self.font, fill=col)
+            cx += self._adv(ch)
+
+        tw = int(math.ceil(max(self._width(self.text),
+                               self._width(self.prev)))) + pad * 2
+        th = int(math.ceil(h)) + pad * 2
+        if self.t >= 1.0 or self.prev == self.text:
+            mask = self._tile(self.text, w, h, t, tw, th, pad)
+        else:
+            p = self.t * self.t * (3 - 2 * self.t)      # smoothstep
+            col = mix(self.color, self.accent, 0.7 * math.sin(math.pi * self.t))
+            mask = Image.blend(self._tile(self.prev, w, h, t, tw, th, pad),
+                               self._tile(self.text, w, h, t, tw, th, pad), p)
+
+        layer = Image.new("RGBA", (tw, th), col + (255,))
+        layer.putalpha(mask)
+        img.paste(layer, (left, top), layer)
+
+
 # ------------------------------------------------------------- dashboard -----
 @dataclass
 class Vals:
@@ -352,6 +545,7 @@ class Dashboard:
         self._bg_key = None
         self._bg_img = None
         self._plain = False     # True while a user backdrop replaces the chrome
+        self._num_style = None  # face the numerals were built for
 
         # RGB565 softens thin strokes, so nothing is drawn in a regular weight
         self._f_lbl = F(11, "bold")
@@ -366,25 +560,14 @@ class Dashboard:
         self._f_net = F(11, "semibold")
         self._f_spec = F(11, "semibold")
 
-        self.num_cpu = RollText(self._f_big, TEXT, ACCENT_CYAN)
-        self.num_gpu = RollText(self._f_big, TEXT, ACCENT_VIOLET)
-        self.num_fc = RollText(self._f_freq, TEXT, ACCENT_CYAN)
-        self.num_fg = RollText(self._f_freq, TEXT, ACCENT_VIOLET)
-        self.num_mem = RollText(self._f_mid, TEXT, ACCENT_CYAN)
-        self.num_pwr = RollText(self._f_mid, TEXT, ACCENT_AMBER)
-        self.num_fps = RollText(self._f_mid, TEXT, ACCENT_GREEN)
-        self._nums = (self.num_cpu, self.num_gpu, self.num_fc, self.num_fg,
-                      self.num_mem, self.num_pwr, self.num_fps)
-        self._accent_rolls = {self.num_cpu: "accent_cpu", self.num_gpu: "accent_gpu",
-                              self.num_fc: "accent_cpu", self.num_fg: "accent_gpu",
-                              self.num_mem: "accent_mem", self.num_pwr: "accent_pwr"}
         self._layout()
         self.apply_config(self.cfg, force=True)
 
     # ------------------------------------------------------------------ config
     def _look_sig(self):
         c = self.cfg
-        return (c.accent_cpu, c.accent_gpu, c.accent_mem, c.accent_pwr,
+        return (c.style,
+                c.accent_cpu, c.accent_gpu, c.accent_mem, c.accent_pwr,
                 round(c.brightness, 3), round(c.bg_brightness, 3),
                 round(c.saturation, 3), round(c.glass, 3),
                 c.bg_color_top, c.bg_color_mid, c.bg_color_bot,
@@ -395,20 +578,39 @@ class Dashboard:
 
     def apply_config(self, cfg, force=False):
         self.cfg = cfg
-        for r, key in self._accent_rolls.items():
-            r.accent = hex_rgb(getattr(cfg, key), r.accent)
-            r.speed = cfg.roll_speed
-            r.enabled = cfg.roll
-        for r in self._nums:
-            r.speed = cfg.roll_speed
-            r.enabled = cfg.roll
         sig = self._look_sig()
         if force or sig != self._sig:
             self._sig = sig
-            self._layout()
+            self._layout()                 # may rebuild the numeral face
             self._static = None            # chrome must be re-baked
+        for r, key in self._accent_rolls.items():
+            r.accent = hex_rgb(getattr(cfg, key), r.accent)
+        for r in self._nums:
+            r.speed = cfg.roll_speed
+            r.enabled = cfg.roll
+
+    def _build_nums(self):
+        """The numeral face: rolled vector glyphs, or quartz bars."""
+        cls = SegText if self.cfg.style == "quartz" else RollText
+        self.num_cpu = cls(self._f_big, TEXT, ACCENT_CYAN)
+        self.num_gpu = cls(self._f_big, TEXT, ACCENT_VIOLET)
+        self.num_fc = cls(self._f_freq, TEXT, ACCENT_CYAN)
+        self.num_fg = cls(self._f_freq, TEXT, ACCENT_VIOLET)
+        self.num_mem = cls(self._f_mid, TEXT, ACCENT_CYAN)
+        self.num_pwr = cls(self._f_mid, TEXT, ACCENT_AMBER)
+        self.num_fps = cls(self._f_mid, TEXT, ACCENT_GREEN)
+        self._nums = (self.num_cpu, self.num_gpu, self.num_fc, self.num_fg,
+                      self.num_mem, self.num_pwr, self.num_fps)
+        self._accent_rolls = {self.num_cpu: "accent_cpu", self.num_gpu: "accent_gpu",
+                              self.num_fc: "accent_cpu", self.num_fg: "accent_gpu",
+                              self.num_mem: "accent_mem", self.num_pwr: "accent_pwr"}
+        self._num_style = self.cfg.style
+        self._refresh_text()           # a fresh face starts blank; fill it now
 
     def _layout(self):
+        self._radius = 0 if self.cfg.style == "quartz" else CARD_RADIUS
+        if self._num_style != self.cfg.style:
+            self._build_nums()
         keys = [k for k, _, _ in BOTTOM
                 if getattr(self.cfg, "show_" + k, True)]
         self.cards = {}
@@ -528,7 +730,7 @@ class Dashboard:
         ImageDraw.Draw(m).rounded_rectangle(
             ((g.x + inset) * s, (g.y + inset) * s,
              (g.x + g.w - inset) * s, (g.y + g.h - inset) * s),
-            max(1, radius - inset) * s, fill=255)
+            max(0, radius - inset) * s, fill=255)
         return m.resize((W, H), Image.LANCZOS)
 
     def _edge_layer(self, g: Geo, radius, inset, top_a, bot_a):
@@ -537,7 +739,7 @@ class Dashboard:
         ImageDraw.Draw(ring).rounded_rectangle(
             ((g.x + inset) * s, (g.y + inset) * s,
              (g.x + g.w - inset) * s, (g.y + g.h - inset) * s),
-            max(1, radius - inset) * s, outline=255, width=s)
+            max(0, radius - inset) * s, outline=255, width=s)
         ring = ring.resize((W, H), Image.LANCZOS)
         layer = Image.new("RGBA", (W, H), (255, 255, 255, 0))
         layer.putalpha(ImageChops.multiply(ring, self._vgrad(top_a, bot_a)))
@@ -561,12 +763,16 @@ class Dashboard:
         # a loaded user backdrop is the frame: the cards then carry no glass, no
         # edge and no base, so the picture reads as one continuous sheet
         self._plain = self._bg_img is not None
-        enh = ImageEnhance.Color(back.filter(ImageFilter.GaussianBlur(10))
-                                 ).enhance(1.30 * c.saturation)
-        blur = ImageEnhance.Brightness(enh).enhance(c.brightness)
         img = ImageEnhance.Brightness(back).enhance(c.brightness)
-        for g in self.cards.values():
-            self._card(blur, img, g, CARD_RADIUS)
+        if c.style == "quartz":
+            for g in self.cards.values():
+                self._card_neu(img, back, g, self._radius)
+        else:
+            enh = ImageEnhance.Color(back.filter(ImageFilter.GaussianBlur(10))
+                                     ).enhance(1.30 * c.saturation)
+            blur = ImageEnhance.Brightness(enh).enhance(c.brightness)
+            for g in self.cards.values():
+                self._card(blur, img, g, self._radius)
 
         # card captions sit above the liquid fill, so they are drawn per frame
         # (see _labels) instead of being baked into the chrome
@@ -616,12 +822,47 @@ class Dashboard:
                 img.convert("RGBA"),
                 self._edge_layer(g, radius, inset, top_a, bot_a)).convert("RGB"), (0, 0))
 
+    def _card_neu(self, img, back, g: Geo, radius):
+        """Neumorphic slab: the card is the backdrop itself, lifted a shade.
+
+        The depth is all in the shading, never in a different material -- one
+        dark drop shadow under the slab, one bright catch light inside its top
+        rim and a shadow inside the bottom, so the card reads as milled out of
+        the panel rather than a sheet of glass laid on top of it.
+        """
+        if self._plain:               # borderless: the picture is the frame
+            return
+        mask = self._round_mask(g, radius)
+
+        sh = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(sh).rounded_rectangle(
+            (g.x + 2, g.y + 4, g.x + g.w + 2, g.y + g.h + 4), radius,
+            fill=(0, 0, 0, 175))
+        sh = sh.filter(ImageFilter.GaussianBlur(4))
+        img.paste(Image.alpha_composite(img.convert("RGBA"), sh).convert("RGB"), (0, 0))
+
+        img.paste(ImageEnhance.Brightness(back).enhance(1.14), (0, 0), mask)
+
+        ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ov.paste((255, 255, 255, 255), (0, 0),
+                 ImageChops.multiply(mask, self._vgrad(30, 0)))
+        ov.paste((0, 0, 0, 255), (0, 0),
+                 ImageChops.multiply(mask, self._vgrad(0, 78)))
+        img.paste(Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB"), (0, 0))
+
+        # the emboss: lit top rim, shaded bottom rim, then the same pair one
+        # pixel inside to give the slab a thickness
+        for inset, top_a, bot_a in ((0, 200, 20), (1, 0, 132)):
+            img.paste(Image.alpha_composite(
+                img.convert("RGBA"),
+                self._edge_layer(g, radius, inset, top_a, bot_a)).convert("RGB"), (0, 0))
+
     # ------------------------------------------------------------------ pool
     def _card_mask_np(self, key, g: Geo):
         """Card outline as a float 0..1 mask, cropped to the card box."""
         m = self._masks.get(key)
         if m is None:
-            m = np.asarray(self._round_mask(g, CARD_RADIUS).crop(g.box),
+            m = np.asarray(self._round_mask(g, self._radius).crop(g.box),
                            np.float32) / 255.0
             self._masks[key] = m
         return m
@@ -804,7 +1045,7 @@ class Dashboard:
                 pulse = 0.5 + 0.5 * math.sin(self.time * 3.0)
                 col = ACCENT_RED if pct > 92 else ACCENT_AMBER
                 a = int((pct - 80) / 20 * 55 * (0.6 + 0.4 * pulse))
-                d.rounded_rectangle(self.cards[key].box, CARD_RADIUS,
+                d.rounded_rectangle(self.cards[key].box, self._radius,
                                     outline=col + (min(a, 60),), width=2)
 
         self._labels(d)
