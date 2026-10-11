@@ -15,8 +15,9 @@ Design notes
 * Numbers roll into place like a slot reel when they change (the panel now runs
   at tens of frames per second, so the motion reads properly).
 * The chrome comes in two faces, picked from the panel: the default rounded
-  glass, and a quartz face -- square-cornered neumorphic slabs with seven-bar
-  watch numerals. Only the furniture changes; the data never does.
+  glass, and a quartz face -- square-cornered machined cases, screwed to the
+  panel, with seven-bar watch numerals. Only the furniture changes; the data
+  never does.
 """
 from __future__ import annotations
 
@@ -72,6 +73,18 @@ WATER_HZ = 9.0         # ripple steps per second
 WATER_STEP = 0.30      # radians advanced per step
 WATER_RISE = 1.1       # bob steps per second
 CARD_RADIUS = 16
+
+# The quartz face is a machined case, so its metal tones are fixed greys rather
+# than anything the user picked: the backdrop tints the dial, not the frame.
+# CASE_BEZEL doubles as the inset the pool is clipped to, so the liquid sits in
+# the glass and never washes over the bezel.
+METAL_HI = (148, 156, 167)
+METAL_LO = (28, 32, 38)
+SCREW = (170, 178, 189)
+DIAL_BASE = (46, 50, 57)   # gunmetal the dial plate sits on
+CASE_BEZEL = 4
+PLATE_BEZEL = 2
+DIAL_DIM = 0.75        # dial plate brightness relative to the backdrop
 
 
 def _font(names, size):
@@ -609,6 +622,9 @@ class Dashboard:
 
     def _layout(self):
         self._radius = 0 if self.cfg.style == "quartz" else CARD_RADIUS
+        # how far the live area sits inside the card outline. The glass face has
+        # no frame, so its pool runs to the edge; the quartz case has a bezel.
+        self._inset = CASE_BEZEL if self.cfg.style == "quartz" else 0
         if self._num_style != self.cfg.style:
             self._build_nums()
         keys = [k for k, _, _ in BOTTOM
@@ -763,10 +779,15 @@ class Dashboard:
         # a loaded user backdrop is the frame: the cards then carry no glass, no
         # edge and no base, so the picture reads as one continuous sheet
         self._plain = self._bg_img is not None
+        ins = CASE_BEZEL if (c.style == "quartz" and not self._plain) else 0
+        if ins != self._inset:
+            self._inset = ins
+            self._masks = {}
         img = ImageEnhance.Brightness(back).enhance(c.brightness)
         if c.style == "quartz":
+            self._plate(img, back, TOP_BAR, PLATE_BEZEL)
             for g in self.cards.values():
-                self._card_neu(img, back, g, self._radius)
+                self._case(img, back, g, self._radius)
         else:
             enh = ImageEnhance.Color(back.filter(ImageFilter.GaussianBlur(10))
                                      ).enhance(1.30 * c.saturation)
@@ -822,53 +843,118 @@ class Dashboard:
                 img.convert("RGBA"),
                 self._edge_layer(g, radius, inset, top_a, bot_a)).convert("RGB"), (0, 0))
 
-    def _card_neu(self, img, back, g: Geo, radius):
-        """Neumorphic slab: the card is the backdrop itself, lifted a shade.
+    def _dial(self, back):
+        """The plate behind the glass: the backdrop smoked down and drained of
+        colour, over a gunmetal base. A case holds a dial, not a hole -- and
+        because the base is neutral, the dial reads as the same instrument
+        whatever gradient the user picked."""
+        plate = Image.blend(ImageEnhance.Color(back).enhance(0.34),
+                            Image.new("RGB", (W, H), DIAL_BASE), 0.5)
+        return ImageEnhance.Brightness(plate).enhance(DIAL_DIM)
 
-        The depth is all in the shading, never in a different material -- one
-        dark drop shadow under the slab, one bright catch light inside its top
-        rim and a shadow inside the bottom, so the card reads as milled out of
-        the panel rather than a sheet of glass laid on top of it.
+    def _case_ramp(self, g: Geo):
+        """Vertical chrome ramp across a card, so the bezel catches the light at
+        its own top edge and falls into shadow at its own bottom."""
+        t = (np.arange(g.h, dtype=np.float32) / max(1.0, g.h - 1.0)) ** 1.5
+        hi, lo = np.array(METAL_HI, np.float32), np.array(METAL_LO, np.float32)
+        col = hi + (lo - hi) * t[:, None]
+        return Image.fromarray(
+            np.clip(np.repeat(col[:, None, :], g.w, axis=1), 0, 255).astype(np.uint8),
+            "RGB")
+
+    def _screw(self, img, cx, cy, r):
+        """One slot-head screw, rasterised at 4x so a 5 px head still reads as a
+        screw rather than a smudge."""
+        s = self.MASK_SS
+        n = int(2 * r) + 3
+        tile = Image.new("RGBA", (n * s, n * s), (0, 0, 0, 0))
+        td = ImageDraw.Draw(tile)
+        c, rr = n * s / 2.0, r * s
+        td.ellipse((c - rr, c - rr, c + rr, c + rr), fill=SCREW + (255,))
+        td.ellipse((c - rr, c - rr, c + rr, c + rr),
+                   outline=TEXT_SHADOW + (225,), width=max(1, s // 2))
+        sl = rr * 0.62
+        td.line((c - sl, c + sl, c + sl, c - sl),
+                fill=TEXT_SHADOW + (235,), width=max(1, int(s * 1.1)))
+        td.arc((c - rr * 0.68, c - rr * 0.68, c + rr * 0.68, c + rr * 0.68),
+               166, 302, fill=(255, 255, 255, 165), width=s)
+        tile = tile.resize((n, n), Image.LANCZOS)
+        img.paste(tile, (int(round(cx - n / 2.0)), int(round(cy - n / 2.0))), tile)
+
+    def _plate(self, img, back, g: Geo, b):
+        """The instrument's nameplate: the same machined chrome as the cards.
+
+        The status dot that pulses in the top bar then reads as the panel's
+        power LED in a recessed window, which is what a bench instrument's
+        plate looks like.
+        """
+        outer = self._round_mask(g, 0, 0)
+        inner = self._round_mask(g, 0, b)
+        img.paste(self._case_ramp(g), (g.x, g.y),
+                  ImageChops.subtract(outer, inner).crop(g.box))
+        img.paste(self._dial(back), (0, 0), inner)
+        for inset, top_a, bot_a in ((0, 190, 18), (b - 1, 10, 118)):
+            img.paste(Image.alpha_composite(
+                img.convert("RGBA"),
+                self._edge_layer(g, 0, inset, top_a, bot_a)).convert("RGB"), (0, 0))
+
+    def _case(self, img, back, g: Geo, radius):
+        """A case for a bench instrument, not a sheet of glass.
+
+        Everything separating this face from the glass one is structural: the
+        corners are square, the depth is built from a light-catching chrome
+        bezel plus a chamfer instead of a blur, and the thing is visibly
+        fastened -- four screws, one at each corner of the bezel. The dial
+        behind the glass is the backdrop smoked down and drained of colour, so
+        the frame stays metal whatever gradient the user picks.
         """
         if self._plain:               # borderless: the picture is the frame
             return
-        mask = self._round_mask(g, radius)
+        b = CASE_BEZEL
+        outer = self._round_mask(g, radius, 0)
+        inner = self._round_mask(g, radius, b)
 
         sh = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ImageDraw.Draw(sh).rounded_rectangle(
-            (g.x + 2, g.y + 4, g.x + g.w + 2, g.y + g.h + 4), radius,
-            fill=(0, 0, 0, 175))
+        ImageDraw.Draw(sh).rectangle(
+            (g.x + 2, g.y + 4, g.x + g.w + 2, g.y + g.h + 4), fill=(0, 0, 0, 195))
         sh = sh.filter(ImageFilter.GaussianBlur(4))
         img.paste(Image.alpha_composite(img.convert("RGBA"), sh).convert("RGB"), (0, 0))
 
-        img.paste(ImageEnhance.Brightness(back).enhance(1.14), (0, 0), mask)
+        dial = self._dial(back)
+        img.paste(dial, (0, 0), inner)
 
-        ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ov.paste((255, 255, 255, 255), (0, 0),
-                 ImageChops.multiply(mask, self._vgrad(30, 0)))
-        ov.paste((0, 0, 0, 255), (0, 0),
-                 ImageChops.multiply(mask, self._vgrad(0, 78)))
-        img.paste(Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB"), (0, 0))
-
-        # the emboss: lit top rim, shaded bottom rim, then the same pair one
-        # pixel inside to give the slab a thickness
-        for inset, top_a, bot_a in ((0, 200, 20), (1, 0, 132)):
+        img.paste(self._case_ramp(g), (g.x, g.y),
+                  ImageChops.subtract(outer, inner).crop(g.box))
+        # the case edge, then the chamfer where the bezel drops into the glass;
+        # both are one-sided, and that asymmetry is what reads as a machined bevel
+        for inset, top_a, bot_a in ((0, 210, 14), (b - 1, 6, 155)):
             img.paste(Image.alpha_composite(
                 img.convert("RGBA"),
                 self._edge_layer(g, radius, inset, top_a, bot_a)).convert("RGB"), (0, 0))
 
+        m = b / 2.0
+        for cx, cy in ((g.x + m, g.y + m), (g.x + g.w - m, g.y + m),
+                       (g.x + m, g.y + g.h - m), (g.x + g.w - m, g.y + g.h - m)):
+            self._screw(img, cx, cy, 1.9)
+
     # ------------------------------------------------------------------ pool
+    def _live_box(self, g: Geo):
+        """The area the pool owns: the whole card for glass, the glass inside
+        the bezel for quartz."""
+        i = self._inset
+        return (g.x + i, g.y + i, g.x + g.w - i, g.y + g.h - i)
+
     def _card_mask_np(self, key, g: Geo):
-        """Card outline as a float 0..1 mask, cropped to the card box."""
+        """Card outline as a float 0..1 mask, cropped to the live box."""
         m = self._masks.get(key)
         if m is None:
-            m = np.asarray(self._round_mask(g, self._radius).crop(g.box),
-                           np.float32) / 255.0
+            m = np.asarray(self._round_mask(g, self._radius, self._inset)
+                           .crop(self._live_box(g)), np.float32) / 255.0
             self._masks[key] = m
         return m
 
     def _water(self, img, key, g: Geo, pct, theme):
-        """Fill card ``g`` with liquid up to ``pct``%.
+        """Fill the glass of card ``g`` with liquid up to ``pct``%.
 
         The waterline is anti-aliased: a pixel's water coverage is the fraction
         of its square that falls below the surface, so the wave reads as a
@@ -887,7 +973,8 @@ class Dashboard:
         pct = max(0.0, min(100.0, pct))
         if pct <= 0.35:
             return
-        h, w = g.h, g.w
+        box = self._live_box(g)
+        h, w = box[3] - box[1], box[2] - box[0]
         span = max(1.0, (h - 1.0) - 1.0)
         # Quantise the level: an unchanged pool must produce identical pixels,
         # otherwise every sub-pixel wobble dirties the entire liquid area and
@@ -909,7 +996,7 @@ class Dashboard:
 
         # coverage of row yy by water, ramped over one pixel -> edge AA
         cov = np.clip(depth + 0.5, 0.0, 1.0)
-        grad = yy / float(h - 1)               # 0 at card top, 1 at card bottom
+        grad = yy / float(h - 1)               # 0 at glass top, 1 at glass bottom
         a_body = (232.0 - 96.0 * grad) * cov / 255.0
         # the crest hugs the waterline and fades into the body, so it needs no
         # hard band of its own; brightening it over the short swell reads as
@@ -929,10 +1016,10 @@ class Dashboard:
         col = num / np.maximum(a, 1e-6)[..., None]
         a = (a * self._card_mask_np(key, g))[..., None]
 
-        sub = np.asarray(img.crop(g.box), np.float32)
+        sub = np.asarray(img.crop(box), np.float32)
         img.paste(Image.fromarray(
             np.clip(sub * (1.0 - a) + col * a, 0, 255).astype(np.uint8), "RGB"),
-            (g.x, g.y))
+            (box[0], box[1]))
 
     # ------------------------------------------------------------- animation
     def step(self, dt):
@@ -1045,8 +1132,11 @@ class Dashboard:
                 pulse = 0.5 + 0.5 * math.sin(self.time * 3.0)
                 col = ACCENT_RED if pct > 92 else ACCENT_AMBER
                 a = int((pct - 80) / 20 * 55 * (0.6 + 0.4 * pulse))
-                d.rounded_rectangle(self.cards[key].box, self._radius,
-                                    outline=col + (min(a, 60),), width=2)
+                g, ins = self.cards[key], self._inset
+                d.rounded_rectangle(
+                    (g.x + ins, g.y + ins, g.x + g.w - ins, g.y + g.h - ins),
+                    max(0, self._radius - ins),
+                    outline=col + (min(a, 60),), width=2)
 
         self._labels(d)
         self._big_card(d, img, self.cards["cpu"], self.num_cpu, self.num_fc,
