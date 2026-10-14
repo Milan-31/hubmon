@@ -603,7 +603,7 @@ TOP_BAR = Geo(8, 4, 304, 16)
 SPEC_X0, SPEC_X1 = 8, 312
 SPEC_TOP, SPEC_BOT = 33, 153
 SPEC_ROW, SPEC_ROWS = 10, 12
-SPEC_CELL, SPEC_BAR = 10, 10
+SPEC_CELL, SPEC_BAR = 5, 5
 SPEC_MID = (SPEC_TOP + SPEC_BOT) // 2
 SPEC_RAIL_Y = 152
 SPEC_TICK_Y = 154
@@ -1135,7 +1135,7 @@ class Dashboard:
 
     def _spec_dots(self, img, d, bands, peaks, accent):
         """A column of round dots per band; a louder band lights more of them."""
-        dot, gap = 5, 8
+        dot, gap = 3, 6
         span = SPEC_BOT - SPEC_TOP
         rows = span // gap
         hot = mix(accent, (255, 255, 255), 0.42)
@@ -1150,7 +1150,7 @@ class Dashboard:
 
     def _spec_fine(self, img, d, bands, peaks, accent):
         """Narrow columns with wide gaps and a 1 px bright head."""
-        w = 5
+        w = 3
         body = mix(accent, (12, 16, 24), 0.30)
         head = mix(accent, (255, 255, 255), 0.50)
         span = SPEC_BOT - SPEC_TOP

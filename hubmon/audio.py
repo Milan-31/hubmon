@@ -5,8 +5,8 @@ capture device, a muted endpoint, or no audio library installed at all. So every
 failure here degrades to a silent baseline instead of raising -- ``state`` says
 what happened and the renderer shows a hint, but the stream keeps running.
 
-The analyser itself is deliberately small: one 1024-point FFT per frame, folded
-into 24 log-spaced bands, then smoothed with a fast-attack / slow-release
+The analyser itself is deliberately small: one 2048-point FFT per frame, folded
+into 48 log-spaced bands, then smoothed with a fast-attack / slow-release
 envelope and a peak hold. Nothing here touches Pillow or the USB link.
 """
 from __future__ import annotations
@@ -22,10 +22,10 @@ try:
 except Exception:                      # a missing library must not break the app
     _sc = None
 
-BANDS = 24
+BANDS = 48
 SR = 48000
-BLOCK = 1024
-FFT_N = 1024
+BLOCK = 2048
+FFT_N = 2048
 FMIN, FMAX = 40.0, 16000.0
 FLOOR_DB = -60.0                       # everything quieter reads as zero
 # Envelope time constants in seconds, at the *middle* of the panel's smoothing
@@ -47,10 +47,16 @@ _FC = np.sqrt(_EDGES[:-1] * _EDGES[1:])          # geometric centre of each band
 _BINS = np.fft.rfftfreq(FFT_N, 1.0 / SR)
 _WINDOW = np.hanning(FFT_N)
 _WINDOW_SUM = float(_WINDOW.sum())
-# one bin range per band; the +1 keeps a band from ever coming back empty
-_EDGE_BINS = np.searchsorted(_BINS, _EDGES)
-_SLICES = [(int(_EDGE_BINS[i]), max(int(_EDGE_BINS[i]) + 1, int(_EDGE_BINS[i + 1])))
-           for i in range(BANDS)]
+# Each band is probed at several frequencies and keeps the loudest. With 48 log
+# bands the lowest ones are narrower than a single FFT bin, so slicing bins would
+# hand several neighbouring bars the same reading -- probing frequencies instead
+# lets every bar carry its own value, and it degrades to a smooth slope where the
+# transform genuinely has no resolution left.
+_SAMPLES_PER_BAND = 8
+_PROBE_T = np.linspace(0.0, 1.0, _SAMPLES_PER_BAND)
+_PROBE_F = (_EDGES[:-1][:, None]
+            + (_EDGES[1:] - _EDGES[:-1])[:, None] * _PROBE_T).ravel()
+
 
 
 def tilt_db(db_per_oct):
@@ -181,7 +187,7 @@ class Spectrum:
 
     # ------------------------------------------------------------- analysing
     def _analyse(self, block):
-        """24 band levels in 0..1, peak-per-band, dB-scaled to full scale."""
+        """48 band levels in 0..1, peak-per-band, dB-scaled to full scale."""
         x = np.asarray(block, dtype=np.float32)
         if x.ndim > 1:
             x = x.mean(axis=1)
@@ -190,13 +196,12 @@ class Spectrum:
         elif x.shape[0] > FFT_N:
             x = x[:FFT_N]
         amp = 2.0 * np.abs(np.fft.rfft(x * _WINDOW)) / _WINDOW_SUM
-        out = []
-        for i, (lo, hi) in enumerate(_SLICES):
-            peak = float(amp[lo:hi].max()) if hi > lo else 0.0
-            db = 20.0 * math.log10(peak) if peak > 1e-7 else FLOOR_DB
-            db += float(self._tilt[i])
-            out.append(min(1.0, max(0.0, (db - FLOOR_DB) / -FLOOR_DB)))
-        return out
+        # probe each band's own frequencies rather than slicing bins, so that
+        # bands narrower than one bin still read their own value
+        probes = np.interp(_PROBE_F, _BINS, amp)
+        band_amp = probes.reshape(BANDS, _SAMPLES_PER_BAND).max(axis=1)
+        db = 20.0 * np.log10(np.maximum(band_amp, 1e-7)) + self._tilt
+        return np.clip((db - FLOOR_DB) / -FLOOR_DB, 0.0, 1.0).tolist()
 
     def levels(self, dt: float):
         """(bands, peaks) for the next frame, stepping the envelope by ``dt``."""
