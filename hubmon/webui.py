@@ -181,10 +181,17 @@ SCHEMA = [
             ]},
             {"caption": "音频频谱", "when": {"key": "mode", "eq": "spectrum"},
              "rows": [
-                 {"key": "spectrum_style", "label": "频谱风格", "type": "enum",
+                 {"key": "spectrum_style", "label": "频谱风格", "type": "list",
                   "options": [["led", "LED 点阵柱"], ["peak", "峰值保持"],
-                              ["mirror", "镜像渐变柱"]]},
-                 {"key": "spectrum_device", "label": "采集设备", "type": "text"},
+                              ["line", "折线波形"], ["area", "面积山形"],
+                              ["sym", "对称镜像柱"], ["grad", "单侧渐变柱"],
+                              ["dots", "圆点脉冲"], ["fine", "细柱阵列"]]},
+                 {"key": "spectrum_device", "label": "采集设备", "type": "list",
+                  "remote": "/api/spectrum-devices"},
+                 {"key": "spectrum_tilt", "label": "频段倾斜", "type": "num",
+                  "min": -6, "max": 6, "step": 0.5, "unit": "dB/oct"},
+                 {"key": "spectrum_smoothing", "label": "灵敏度平滑", "type": "num",
+                  "min": 0, "max": 1, "step": 0.05, "unit": ""},
              ]},
             {"caption": "显示调节", "rows": [
                 {"key": "brightness", "label": "整体亮度", "type": "num",
@@ -626,6 +633,22 @@ _PAGE = r"""<!DOCTYPE html>
     transition:border-color .2s,box-shadow .2s;font-variant-numeric:tabular-nums;
   }
   input.input:focus{border-color:var(--accent);box-shadow:var(--sink)}
+  /* ---- pickers: a native select, so eight options fit where a segmented
+     control would have run off the row ---- */
+  select.input{
+    font-family:var(--font);font-size:14px;color:var(--text);
+    background-color:rgba(0,0,0,.28);border:1px solid var(--hair);
+    border-radius:var(--r-sw);padding:8px 30px 8px 12px;
+    width:min(260px,58%);text-align:left;outline:none;appearance:none;
+    text-overflow:ellipsis;
+    background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),
+                     linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+    background-position:calc(100% - 16px) 55%, calc(100% - 11px) 55%;
+    background-size:5px 5px,5px 5px;background-repeat:no-repeat;
+    transition:border-color .2s,box-shadow .2s;
+  }
+  select.input:focus{border-color:var(--accent);box-shadow:var(--sink)}
+  select.input option{background:#1b1d22;color:var(--text)}
   /* long values (e.g. an executable path) need room to stay readable */
   .row-wide input.input{width:min(420px,58%);text-align:left}
 
@@ -1106,6 +1129,51 @@ _PAGE = r"""<!DOCTYPE html>
       paint();
       return el;
     }
+    if(row.type === 'list'){
+      el = document.createElement('div');
+      el.className = 'row';
+      el.innerHTML = '<span class="label">' + esc(row.label) + '</span>' +
+        '<div class="spacer"></div><select class="input"></select>';
+      var sel = $('select', el);
+      function fill(opts){
+        sel.innerHTML = '';
+        opts.forEach(function(o){
+          var op = document.createElement('option');
+          op.value = o[0]; op.textContent = o[1];
+          sel.appendChild(op);
+        });
+        var cur = String(CFG[row.key] || '');
+        /* the stored value can be missing from the list -- the device was
+           unplugged, or enumeration came back empty -- and it has to stay
+           selectable instead of silently resetting to something else */
+        if(cur && !opts.some(function(o){ return o[0] === cur; })){
+          var op = document.createElement('option');
+          op.value = cur; op.textContent = cur + '（未检测到）';
+          sel.appendChild(op);
+        }
+        sel.value = cur;
+      }
+      if(row.remote){
+        fill([['', '跟随系统默认']]);
+        fetch(row.remote)
+          .then(function(r){ return r.json(); })
+          .then(function(d){
+            fill([['', d.follow || '跟随系统默认']].concat(
+              (d.devices || []).map(function(n){ return [n, n]; })));
+          })
+          .catch(function(){ toast('采集设备列表读取失败'); });
+      }else{
+        fill((row.options || []).map(function(o){ return [o[0], o[1]]; }));
+      }
+      sel.addEventListener('change', function(){
+        CFG[row.key] = sel.value;
+        /* a style swap re-bakes the chrome and a device swap restarts the
+           capture, so neither should wait for the next save */
+        applyCfg();
+      });
+      SYNC.push(function(){ sel.value = String(CFG[row.key] || ''); });
+      return el;
+    }
     if(row.type === 'color'){
       el = document.createElement('div');
       el.className = 'row';
@@ -1509,6 +1577,7 @@ class _Server(ThreadingHTTPServer):
     actual_port = None
     on_quit = None
     choose_image = None
+    device_list = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -1573,6 +1642,17 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/stats":
                 data = self.server.provider()
                 self._json(200, data if isinstance(data, dict) else {})
+            elif path == "/api/spectrum-devices":
+                # the list comes from an injected callable: this handler runs on
+                # a thread of its own, and bringing up the capture library's COM
+                # apartment is the provider's business, not the panel's
+                names = []
+                if self.server.device_list is not None:
+                    try:
+                        names = list(self.server.device_list())
+                    except Exception:
+                        names = []
+                self._json(200, {"follow": "跟随系统默认", "devices": names})
             elif path == "/api/status":
                 self._json(200, {"ok": True, "port": self.server.actual_port})
             else:
@@ -1616,7 +1696,7 @@ class _Handler(BaseHTTPRequestHandler):
 # Public API
 # --------------------------------------------------------------------------- #
 def start(cfg, provider, port=None, open_browser=False, on_quit=None,
-          choose_image=None):
+          choose_image=None, device_list=None):
     """Start the panel on 127.0.0.1 and return the running server."""
     base = int(port if port is not None else getattr(cfg, "ui_port", 8756))
 
@@ -1642,6 +1722,7 @@ def start(cfg, provider, port=None, open_browser=False, on_quit=None,
     httpd.actual_port = actual
     httpd.on_quit = on_quit
     httpd.choose_image = choose_image or pick_image_path
+    httpd.device_list = device_list
 
     thread = threading.Thread(
         target=httpd.serve_forever, name="hubmon-webui", daemon=True

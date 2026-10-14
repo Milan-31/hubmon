@@ -113,13 +113,13 @@ def run_preview(cfg, outdir, frames, fps):
     print("preview frames:", ", ".join(saved))
 
 
-def run_stream(cfg, demo=False, log_every=5.0):
-    sensor = Demo() if demo else Sensors(presentmon_path=cfg.presentmon_path)
-    dash = Dashboard(cfg)
+def stats_provider(dash, state):
+    """Build the panel's stats callback around a live dashboard and state dict.
 
-    state = {"connected": False, "out_fps": 0.0, "kb_s": 0.0,
-             "patches": 0, "frames": 0}
-
+    Kept as its own function so the shape of ``/api/stats`` -- including the
+    spectrum band array the utilisation check reads -- can be asserted without
+    standing up the whole streaming loop.
+    """
     def provider():
         v = dash.v
         d = dict(state)
@@ -129,12 +129,25 @@ def run_stream(cfg, demo=False, log_every=5.0):
                  cores=core_label(v.cpu_cores, v.cpu_threads),
                  net_down=round(v.net_down), net_up=round(v.net_up),
                  cpu_power=round(v.cpu_power), gpu_power=round(v.gpu_power),
-                 fg_app=v.fg_app, fg_fps=round(v.fg_fps, 1), host=v.host)
+                 fg_app=v.fg_app, fg_fps=round(v.fg_fps, 1), host=v.host,
+                 spectrum_bands=list(dash.spectrum_bands),
+                 spectrum_peaks=list(dash.spectrum_peaks))
         return d
+    return provider
+
+
+def run_stream(cfg, demo=False, log_every=5.0):
+    sensor = Demo() if demo else Sensors(presentmon_path=cfg.presentmon_path)
+    dash = Dashboard(cfg)
+
+    state = {"connected": False, "out_fps": 0.0, "kb_s": 0.0,
+             "patches": 0, "frames": 0}
+
+    provider = stats_provider(dash, state)
 
     if not demo:
         sensor.start()
-    spec = audio.Spectrum(cfg.spectrum_device)
+    spec = audio.Spectrum(cfg.spectrum_device, cfg.spectrum_tilt, cfg.spectrum_smoothing)
     screen = transport.LiveScreen()
 
     try:
@@ -159,6 +172,7 @@ def run_stream(cfg, demo=False, log_every=5.0):
     try:
         panel = webui.start(cfg, provider, port=cfg.ui_port,
                             open_browser=cfg.open_browser,
+                            device_list=audio.output_device_names,
                             on_quit=lambda: stop.__setitem__("v", True))
         print(f"[hubmon] control panel: http://127.0.0.1:{panel.actual_port}/")
     except Exception as e:
@@ -185,7 +199,11 @@ def run_stream(cfg, demo=False, log_every=5.0):
             dash.apply_config(cfg)         # pick up live panel edits
             if cfg.spectrum_device != spec.device:
                 spec.stop()               # the panel changed the capture device
-                spec = audio.Spectrum(cfg.spectrum_device)
+                spec = audio.Spectrum(cfg.spectrum_device, cfg.spectrum_tilt,
+                                      cfg.spectrum_smoothing)
+            # the analyser's two knobs are live values: retuning them costs a
+            # float compare, so the panel's sliders respond without a restart
+            spec.tune(cfg.spectrum_tilt, cfg.spectrum_smoothing)
             want_spec = (cfg.mode == "spectrum")
             if want_spec and not demo:
                 spec.start()

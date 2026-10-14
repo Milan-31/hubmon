@@ -603,7 +603,7 @@ TOP_BAR = Geo(8, 4, 304, 16)
 SPEC_X0, SPEC_X1 = 8, 312
 SPEC_TOP, SPEC_BOT = 33, 153
 SPEC_ROW, SPEC_ROWS = 10, 12
-SPEC_CELL, SPEC_BAR = 10, 8
+SPEC_CELL, SPEC_BAR = 10, 10
 SPEC_MID = (SPEC_TOP + SPEC_BOT) // 2
 SPEC_RAIL_Y = 152
 SPEC_TICK_Y = 154
@@ -611,8 +611,45 @@ SPEC_TOP_STRIP = 24          # the top bar band, above the first card row
 SPEC_PITCH = (SPEC_X1 - SPEC_X0) / BANDS
 SPEC_TICKS = ((100.0, "100"), (1000.0, "1k"), (10000.0, "10k"))
 SILENCE = [0.0] * BANDS      # a flat band, shared and never written to
-_SPEC_SEG = {}               # mirrored-gradient segments, keyed by accent + height
 PAD = 12
+
+# The spectrum's styles, as (baked chrome, live bars). Chrome runs once per bake
+# and draws whatever is identical every frame; bars runs every frame. Adding a
+# style is two methods and one line here -- the dispatch itself never grows, and
+# an unknown value falls back to the default instead of drawing nothing.
+DEFAULT_STYLE = "led"
+STYLES = {
+    "led": ("_chrome_led", "_spec_led"),
+    "peak": ("_chrome_grid", "_spec_peak"),
+    "line": ("_chrome_grid", "_spec_line"),
+    "area": ("_chrome_grid", "_spec_area"),
+    "sym": ("_chrome_grid", "_spec_sym"),
+    "grad": ("_chrome_grid", "_spec_grad"),
+    "dots": ("_chrome_grid", "_spec_dots"),
+    "fine": ("_chrome_grid", "_spec_fine"),
+}
+
+
+def spec_ramp(accent):
+    """A bar's vertical colour, indexed by distance above the baseline.
+
+    The colour at a pixel depends only on *where* it is, never on how tall the
+    band happens to be this frame. That is what keeps a gradient bar cheap: when
+    a band grows it only exposes new rows, and every row that was already lit is
+    redrawn in exactly the colour it had before, so the dirty-rect pass reports
+    the growth and nothing else. The deleted mirror style scaled its gradient to
+    the bar height, so every row changed whenever the level moved.
+    """
+    span = SPEC_BOT - SPEC_TOP
+    lo = mix(accent, (10, 14, 22), 0.55)
+    hi = mix(accent, (255, 255, 255), 0.30)
+    return [mix(lo, hi, j / span) for j in range(span + 1)]
+
+
+def spec_x(i):
+    """Left edge of band ``i``'s column, for the styles that fill a full pitch."""
+    return int(SPEC_X0 + i * SPEC_PITCH)
+
 
 
 class Dashboard:
@@ -963,22 +1000,9 @@ class Dashboard:
             self._plate(img, back, TOP_BAR, PLATE_BEZEL)
 
         d = ImageDraw.Draw(img, "RGBA")
-        style = (c.spectrum_style or "led").lower()
-        if style == "led":
-            # the unlit cells are the panel's texture; baked, they are free
-            for i in range(BANDS):
-                x = int(SPEC_X0 + i * SPEC_PITCH + (SPEC_PITCH - SPEC_CELL) / 2)
-                for r in range(SPEC_ROWS):
-                    y = SPEC_BOT - (r + 1) * SPEC_ROW + 1
-                    d.rectangle((x, y, x + SPEC_CELL - 1, y + SPEC_ROW - 2),
-                                fill=(255, 255, 255, 13))
-        elif style == "peak":
-            for frac in (0.2, 0.4, 0.6, 0.8):
-                y = SPEC_BOT - int(frac * (SPEC_BOT - SPEC_TOP))
-                d.line((SPEC_X0, y, SPEC_X1, y), fill=(255, 255, 255, 12))
-        elif style == "mirror":
-            d.line((SPEC_X0, SPEC_MID, SPEC_X1, SPEC_MID),
-                   fill=(255, 255, 255, 22))
+        chrome = STYLES.get((c.spectrum_style or DEFAULT_STYLE).lower(),
+                            STYLES[DEFAULT_STYLE])[0]
+        getattr(self, chrome)(img, d)
         # the rail and the decade ticks are shared: the instrument's own scale
         d.line((SPEC_X0, SPEC_RAIL_Y, SPEC_X1, SPEC_RAIL_Y),
                fill=(255, 255, 255, 26))
@@ -988,6 +1012,21 @@ class Dashboard:
                    fill=(255, 255, 255, 34))
             d.text((x + 2, SPEC_TICK_Y), label, font=self._f_tick, fill=TEXT_DIM)
 
+    def _chrome_led(self, img, d):
+        """The unlit cells, which are the LED face's texture; baked, they are free."""
+        for i in range(BANDS):
+            x = int(SPEC_X0 + i * SPEC_PITCH + (SPEC_PITCH - SPEC_CELL) / 2)
+            for r in range(SPEC_ROWS):
+                y = SPEC_BOT - (r + 1) * SPEC_ROW + 1
+                d.rectangle((x, y, x + SPEC_CELL - 1, y + SPEC_ROW - 2),
+                            fill=(255, 255, 255, 13))
+
+    def _chrome_grid(self, img, d):
+        """Baked dB lines, so a style that draws no cells still carries a scale."""
+        for frac in (0.2, 0.4, 0.6, 0.8):
+            y = SPEC_BOT - int(frac * (SPEC_BOT - SPEC_TOP))
+            d.line((SPEC_X0, y, SPEC_X1, y), fill=(255, 255, 255, 12))
+
     def _spectrum_bars(self, img, d):
         """The bars: the one part of a spectrum frame that is not baked.
 
@@ -995,16 +1034,12 @@ class Dashboard:
         the 10 px row grid, so a band that does not cross a step this frame costs
         no bandwidth at all -- which is what keeps the mode inside the link.
         """
-        style = (self.cfg.spectrum_style or "led").lower()
+        _, bars = STYLES.get((self.cfg.spectrum_style or DEFAULT_STYLE).lower(),
+                             STYLES[DEFAULT_STYLE])
         accent = hex_rgb(self.cfg.accent_cpu, ACCENT_CYAN)
-        if style == "peak":
-            self._spec_peak(d, self.spectrum_bands, self.spectrum_peaks, accent)
-        elif style == "mirror":
-            self._spec_mirror(img, self.spectrum_bands, accent)
-        else:
-            self._spec_led(d, self.spectrum_bands, accent)
+        getattr(self, bars)(img, d, self.spectrum_bands, self.spectrum_peaks, accent)
 
-    def _spec_led(self, d, bands, accent):
+    def _spec_led(self, img, d, bands, peaks, accent):
         """One square per row: solid when lit, and the top cell whitened."""
         hot = mix(accent, (255, 255, 255), 0.42)
         for i, level in enumerate(bands):
@@ -1015,7 +1050,7 @@ class Dashboard:
                 d.rectangle((x, y, x + SPEC_CELL - 1, y + SPEC_ROW - 2),
                             fill=(hot if r == lit - 1 else accent) + (255,))
 
-    def _spec_peak(self, d, bands, peaks, accent):
+    def _spec_peak(self, img, d, bands, peaks, accent):
         """Flat bars with a cap on the recent maximum; amber near full scale."""
         bar = mix(accent, (12, 16, 24), 0.34)
         span = SPEC_BOT - SPEC_TOP
@@ -1031,50 +1066,103 @@ class Dashboard:
                 d.rectangle((x, SPEC_BOT - ph, x + SPEC_BAR - 1, SPEC_BOT - ph + 2),
                             fill=cap + (255,))
 
-    def _spec_strip(self, accent):
-        """The mirrored ramp, baked once per accent and resampled per height."""
-        key = ("strip", accent)
-        strip = _SPEC_SEG.get(key)
-        if strip is None:
-            span = SPEC_MID - SPEC_TOP
-            outer = mix(accent, (255, 255, 255), 0.10)
-            inner = mix(accent, (12, 16, 24), 0.78)
-            strip = Image.new("RGB", (SPEC_BAR, span))
-            px = strip.load()
-            for y in range(span):
-                col = mix(outer, inner, y / (span - 1.0))
-                for x in range(SPEC_BAR):
-                    px[x, y] = col
-            _SPEC_SEG[key] = strip
-        return strip
+    def _spec_sym(self, img, d, bands, peaks, accent):
+        """A flat bar mirrored about the centre line, capped at both outer ends.
 
-    def _spec_seg(self, accent, h):
-        """A rounded-capped bar of height ``h``, cached per accent and height."""
-        key = ("seg", accent, h)
-        seg = _SPEC_SEG.get(key)
-        if seg is None:
-            out = self._spec_strip(accent).resize((SPEC_BAR, h))
-            # the mask is made taller than the crop, so the inner end stays flat
-            # where it meets its own reflection
-            mask = Image.new("L", (SPEC_BAR, h + 6), 0)
-            ImageDraw.Draw(mask).rounded_rectangle((0, 0, SPEC_BAR - 1, h + 5),
-                                                   radius=3, fill=255)
-            seg = (out, mask.crop((0, 0, SPEC_BAR, h)))
-            _SPEC_SEG[key] = seg
-        return seg
+        The plain colour is the point: keeping the same tone everywhere means a
+        band that grows only paints the two rows it just exposed, so the mirrored
+        shape costs little more than the one-sided peak bars.
+        """
+        body = mix(accent, (12, 16, 24), 0.34)
+        cap = mix(accent, (255, 255, 255), 0.42)
+        span = SPEC_BOT - SPEC_TOP
+        for i, level in enumerate(bands):
+            h = (int(level * span) // 2) * 2              # both halves together
+            if not h:
+                continue
+            r = h // 2
+            x = int(SPEC_X0 + i * SPEC_PITCH + (SPEC_PITCH - SPEC_BAR) / 2)
+            d.rectangle((x, SPEC_MID - r, x + SPEC_BAR - 1, SPEC_MID - 1),
+                        fill=body + (255,))
+            d.rectangle((x, SPEC_MID, x + SPEC_BAR - 1, SPEC_MID + r - 1),
+                        fill=body + (255,))
+            d.rectangle((x, SPEC_MID - r, x + SPEC_BAR - 1, SPEC_MID - r + 1),
+                        fill=cap + (255,))
+            d.rectangle((x, SPEC_MID + r - 2, x + SPEC_BAR - 1, SPEC_MID + r - 1),
+                        fill=cap + (255,))
 
-    def _spec_mirror(self, img, bands, accent):
-        """Mirrored about the centre hairline, bright at the outer ends."""
-        span = SPEC_MID - SPEC_TOP
+    def _spec_grad(self, img, d, bands, peaks, accent):
+        """A one-sided bar whose colour is a gradient measured from the baseline."""
+        ramp = spec_ramp(accent)
+        span = SPEC_BOT - SPEC_TOP
         for i, level in enumerate(bands):
             h = (int(level * span) // 2) * 2
-            if h < 2:                    # silence draws nothing, not a stub
+            if not h:
                 continue
-            seg, mask = self._spec_seg(accent, min(span, h))
             x = int(SPEC_X0 + i * SPEC_PITCH + (SPEC_PITCH - SPEC_BAR) / 2)
-            img.paste(seg, (x, SPEC_MID - h), mask)
-            img.paste(seg.transpose(Image.FLIP_TOP_BOTTOM), (x, SPEC_MID),
-                      mask.transpose(Image.FLIP_TOP_BOTTOM))
+            x1 = x + SPEC_BAR - 1
+            for y in range(SPEC_BOT - h + 1, SPEC_BOT + 1):
+                d.line((x, y, x1, y), fill=ramp[SPEC_BOT - y] + (255,))
+
+    def _spec_line(self, img, d, bands, peaks, accent):
+        """A thin polyline through the band centres, with no fill beneath it."""
+        col = mix(accent, (255, 255, 255), 0.25)
+        span = SPEC_BOT - SPEC_TOP
+        pts = [(int(SPEC_X0 + (i + 0.5) * SPEC_PITCH),
+                max(SPEC_TOP + 1, SPEC_BOT - int(level * span)))
+               for i, level in enumerate(bands)]
+        d.line(pts, fill=col + (255,), width=2)
+
+    def _spec_area(self, img, d, bands, peaks, accent):
+        """The polyline silhouette, filled down to the rail with the height ramp.
+
+        Filling each band's own column means the pixels under the line are the
+        same colour two frames running; only the top edge moves, so a curve that
+        shifts paints a couple of rows and not the mountain under it.
+        """
+        ramp = spec_ramp(accent)
+        edge = mix(accent, (255, 255, 255), 0.55)
+        span = SPEC_BOT - SPEC_TOP
+        for i, level in enumerate(bands):
+            top = SPEC_BOT - int(level * span)
+            x0, x1 = spec_x(i), spec_x(i + 1) - 1
+            for y in range(top, SPEC_BOT + 1):
+                d.line((x0, y, x1, y), fill=ramp[SPEC_BOT - y] + (255,))
+        pts = [(int(SPEC_X0 + (i + 0.5) * SPEC_PITCH),
+                max(SPEC_TOP + 1, SPEC_BOT - int(level * span)))
+               for i, level in enumerate(bands)]
+        d.line(pts, fill=edge + (255,), width=2)
+
+    def _spec_dots(self, img, d, bands, peaks, accent):
+        """A column of round dots per band; a louder band lights more of them."""
+        dot, gap = 5, 8
+        span = SPEC_BOT - SPEC_TOP
+        rows = span // gap
+        hot = mix(accent, (255, 255, 255), 0.42)
+        r = dot // 2
+        for i, level in enumerate(bands):
+            cx = int(SPEC_X0 + (i + 0.5) * SPEC_PITCH)
+            lit = int(round(level * rows))
+            for k in range(lit):
+                cy = SPEC_BOT - r - k * gap
+                d.ellipse((cx - r, cy - r, cx + r, cy + r),
+                          fill=(hot if k == lit - 1 else accent) + (255,))
+
+    def _spec_fine(self, img, d, bands, peaks, accent):
+        """Narrow columns with wide gaps and a 1 px bright head."""
+        w = 5
+        body = mix(accent, (12, 16, 24), 0.30)
+        head = mix(accent, (255, 255, 255), 0.50)
+        span = SPEC_BOT - SPEC_TOP
+        for i, level in enumerate(bands):
+            h = (int(level * span) // 2) * 2
+            if not h:
+                continue
+            x = int(SPEC_X0 + i * SPEC_PITCH + (SPEC_PITCH - w) / 2)
+            x1 = x + w - 1
+            d.rectangle((x, SPEC_BOT - h + 1, x1, SPEC_BOT), fill=body + (255,))
+            d.rectangle((x, SPEC_BOT - h + 1, x1, SPEC_BOT - h + 1),
+                        fill=head + (255,))
 
     def _labels(self, d):
         """Card captions, redrawn each frame so the pool never tints them."""

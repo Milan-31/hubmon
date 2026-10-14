@@ -17,6 +17,13 @@ def _config_dir():
 
 CONFIG_PATH = os.path.join(_config_dir(), "config.json")
 
+# Values that no longer exist get folded onto their successor while loading, so
+# a config written before a redesign keeps working instead of silently falling
+# back to a default. Keyed by field, then by the stale value.
+_MIGRATIONS = {
+    "spectrum_style": {"mirror": "led"},   # the heavy gradient style was dropped
+}
+
 
 @dataclass
 class Config:
@@ -64,8 +71,10 @@ class Config:
 
     # ---- audio spectrum ----------------------------------------------------
     mode: str = "dash"           # "dash" the metric cards | "spectrum"
-    spectrum_style: str = "led"  # "led" matrix | "peak" | "mirror"
+    spectrum_style: str = "led"  # see render.STYLES
     spectrum_device: str = ""    # "" = the default playback device's loopback
+    spectrum_tilt: float = 3.0   # dB/octave of band tilt about 1 kHz
+    spectrum_smoothing: float = 0.5   # envelope speed: 0 snappy | 1 slow
 
     # ---- panel -------------------------------------------------------------
     ui_port: int = 8756
@@ -90,6 +99,7 @@ class Config:
         for k, v in (data or {}).items():
             if k not in types:
                 continue
+            v = _MIGRATIONS.get(k, {}).get(v, v) if isinstance(v, str) else v
             cur = getattr(self, k)
             try:
                 if isinstance(cur, bool):
