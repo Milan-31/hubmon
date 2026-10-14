@@ -683,12 +683,24 @@ class Dashboard:
         self.apply_config(self.cfg, force=True)
 
     # ------------------------------------------------------------------ config
+    def _use_image(self):
+        """Whether the chosen backdrop image replaces the gradient.
+
+        "auto" keeps the old meaning -- a chosen image wins -- so existing
+        configs are unaffected; the explicit modes let the image stay selected
+        while the gradient is what is actually shown.
+        """
+        if self._bg_img is None:
+            return False
+        return (self.cfg.bg_mode or "auto").lower() != "gradient"
+
     def _look_sig(self):
         c = self.cfg
         return (c.style,
                 c.accent_cpu, c.accent_gpu, c.accent_mem, c.accent_pwr,
                 round(c.brightness, 3), round(c.bg_brightness, 3),
                 round(c.saturation, 3), round(c.glass, 3),
+                c.bg_mode,
                 c.bg_color_top, c.bg_color_mid, c.bg_color_bot,
                 c.bg_image, round(c.bg_image_blur, 2),
                 round(c.bg_image_brightness, 2), round(c.bg_image_zoom, 3),
@@ -816,7 +828,7 @@ class Dashboard:
 
         yy, xx = np.mgrid[0:H, 0:W]
         r = np.sqrt(((xx - W / 2) / (W / 2)) ** 2 + ((yy - H / 2) / (H / 2)) ** 2)
-        if self._bg_img is not None:
+        if self._use_image():
             # a user photo replaces the procedural gradient; a light vignette is
             # kept so the cards still read against a bright image
             px = np.asarray(self._bg_img, np.float32)
@@ -885,7 +897,7 @@ class Dashboard:
             max(0.0, c.bg_brightness))
         # a loaded user backdrop is the frame: the cards then carry no glass, no
         # edge and no base, so the picture reads as one continuous sheet
-        self._plain = self._bg_img is not None
+        self._plain = self._use_image()
         ins = CASE_BEZEL if (c.style == "quartz" and not self._plain) else 0
         if ins != self._inset:
             self._inset = ins
@@ -1283,25 +1295,34 @@ class Dashboard:
         bo = PLATE_BEZEL if c.style == "quartz" else 0
         wtop, wbot = TOP_BAR.y + bo, TOP_BAR.y + TOP_BAR.h - bo
         # left corner carries the chipset -- the one part of the board name that
-        # means anything at a glance -- falling back to the machine name
-        left_txt = self._board or self.v.host or "PC"
+        # means anything at a glance -- falling back to the machine name, unless
+        # the panel asked for the machine name outright
+        if (c.top_left or "board").lower() == "host":
+            left_txt = self.v.host or "PC"
+        else:
+            left_txt = self._board or self.v.host or "PC"
         d.text((TOP_BAR.x + 2, ink_mid(self._f_host, left_txt, wtop, wbot)),
                left_txt, font=self._f_host, fill=TEXT)
 
-        self.clock = time.strftime("%H:%M:%S")
+        # %I and %H are the same width, so dropping to 12-hour cannot squeeze the
+        # rate readout in the middle (that one is ellipsised once it runs out of
+        # room, so the clock must never grow)
+        fmt = ("%H" if c.clock_24h else "%I") + (":%M:%S" if c.clock_seconds else ":%M")
+        self.clock = time.strftime(fmt)
         cw = self._f_clock.getlength(self.clock)
         d.text((TOP_BAR.x + TOP_BAR.w - cw - 14,
                 ink_mid(self._f_clock, self.clock, wtop, wbot)),
                self.clock, font=self._f_clock, fill=TEXT)
 
-        hw = self._f_host.getlength(left_txt)
-        left = TOP_BAR.x + 6 + hw
-        right = TOP_BAR.x + TOP_BAR.w - cw - 18
-        net = fit(f"↓{rate(self.v.net_down)}/s ↑{rate(self.v.net_up)}/s",
-                  self._f_net, right - left)
-        d.text(((left + right - self._f_net.getlength(net)) / 2.0,
-                ink_mid(self._f_net, net, wtop, wbot)),
-               net, font=self._f_net, fill=TEXT_DIM)
+        if c.show_net:
+            hw = self._f_host.getlength(left_txt)
+            left = TOP_BAR.x + 6 + hw
+            right = TOP_BAR.x + TOP_BAR.w - cw - 18
+            net = fit(f"↓{rate(self.v.net_down)}/s ↑{rate(self.v.net_up)}/s",
+                      self._f_net, right - left)
+            d.text(((left + right - self._f_net.getlength(net)) / 2.0,
+                    ink_mid(self._f_net, net, wtop, wbot)),
+                   net, font=self._f_net, fill=TEXT_DIM)
         cx, cy = TOP_BAR.x + TOP_BAR.w - 8, TOP_BAR.y + 8
         a = int(120 + 135 * (0.5 + 0.5 * math.sin(self.time * 2.4)))
         d.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), fill=ACCENT_GREEN + (a,))

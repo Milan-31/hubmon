@@ -31,6 +31,7 @@ class Config:
     roll_speed: float = 3.2      # rolls per second
 
     # ---- backdrop ----------------------------------------------------------
+    bg_mode: str = "auto"        # "auto" a chosen image wins | "gradient" | "image"
     bg_color_top: str = "#0a0e16"    # three-stop vertical gradient, user-picked
     bg_color_mid: str = "#0d121c"
     bg_color_bot: str = "#101522"
@@ -43,6 +44,11 @@ class Config:
 
     # ---- look --------------------------------------------------------------
     style: str = "glass"         # "glass" rounded glassmorphism | "quartz"
+    theme: str = "default"       # palette preset; rewrites accents + gradient stops
+    top_left: str = "board"      # "board" the chipset | "host" the machine name
+    clock_24h: bool = True       # 24-hour clock; off uses %I (same width)
+    clock_seconds: bool = True   # show seconds in the top-bar clock
+    show_net: bool = True        # the ↓/↑ rate in the middle of the top bar
     brightness: float = 1.0
     bg_brightness: float = 0.6   # backdrop dimmer, independent of UI brightness
     saturation: float = 1.0

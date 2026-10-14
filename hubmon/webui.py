@@ -91,11 +91,6 @@ _ICON_STREAM = (
     '<path d="M16.2 7.8a6 6 0 0 1 0 8.4"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4"/>'
     '<path d="M19 4.9a10 10 0 0 1 0 14.2"/><path d="M5 19.1a10 10 0 0 1 0-14.2"/></svg>'
 )
-_ICON_TEXT = (
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" '
-    'stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5h16v2"/>'
-    '<path d="M12 5v14"/><path d="M9 19h6"/></svg>'
-)
 _ICON_STYLE = (
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" '
     'stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 19.4 15.4 8.6"/>'
@@ -120,92 +115,144 @@ _ICON_PANEL = (
     '<path d="M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/>'
     '<circle cx="8" cy="18" r="2"/></svg>'
 )
-_ICON_TOOL = (
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" '
-    'stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/>'
-    '<path d="M12 2.5v2.6M12 18.9v2.6M21.5 12h-2.6M5.1 12H2.5M18.7 5.3l-1.8 1.8'
-    'M7.1 16.9l-1.8 1.8M18.7 18.7l-1.8-1.8M7.1 7.1 5.3 5.3"/></svg>'
-)
+# One-click palettes. A preset rewrites the four metric accents and the three
+# gradient stops together, which is the fiddly bit users otherwise hand-tune one
+# swatch at a time. "default" repeats today's colours exactly, so an existing
+# config shows no change until another preset is actually chosen.
+THEMES = {
+    "default": ("冷夜蓝", {
+        "accent_cpu": "#38bdf8", "accent_gpu": "#a78bfa",
+        "accent_mem": "#22d3ee", "accent_pwr": "#fbbf24",
+        "bg_color_top": "#0a0e16", "bg_color_mid": "#0d121c",
+        "bg_color_bot": "#101522"}),
+    "graphite": ("石墨灰", {
+        "accent_cpu": "#94a3b8", "accent_gpu": "#cbd5e1",
+        "accent_mem": "#a1a1aa", "accent_pwr": "#d4d4d8",
+        "bg_color_top": "#0b0b0d", "bg_color_mid": "#111114",
+        "bg_color_bot": "#17171b"}),
+    "ember": ("暗焰橙", {
+        "accent_cpu": "#fb923c", "accent_gpu": "#f472b6",
+        "accent_mem": "#facc15", "accent_pwr": "#f87171",
+        "bg_color_top": "#170f0b", "bg_color_mid": "#20130d",
+        "bg_color_bot": "#2a1810"}),
+    "aurora": ("极光青", {
+        "accent_cpu": "#2dd4bf", "accent_gpu": "#818cf8",
+        "accent_mem": "#4ade80", "accent_pwr": "#a3e635",
+        "bg_color_top": "#061110", "bg_color_mid": "#0a1a19",
+        "bg_color_bot": "#0d2320"}),
+}
 
+
+def _theme_row():
+    return {
+        "key": "theme", "label": "配色方案", "type": "enum",
+        "options": [[k, v[0]] for k, v in THEMES.items()],
+        "presets": {k: v[1] for k, v in THEMES.items()},
+    }
+
+
+# Groups carry ``sections`` rather than a flat row list: a group of a dozen
+# settings reads as an undifferentiated wall otherwise, and the caption is what
+# lets related controls stay together instead of splitting into their own nav
+# entry. ``when`` gates a section on another setting (see the backdrop modes).
 SCHEMA = [
     {
-        "title": "风格",
+        "title": "主题",
         "icon": _ICON_STYLE,
-        "rows": [
-            {"key": "style", "label": "界面风格", "type": "enum",
-             "options": [["glass", "玻璃拟态"], ["quartz", "石英电子"]]},
+        "sections": [
+            {"caption": "风格与配色", "rows": [
+                {"key": "style", "label": "界面风格", "type": "enum",
+                 "options": [["glass", "玻璃拟态"], ["quartz", "石英电子"]]},
+                _theme_row(),
+                {"key": "accent_cpu", "label": "CPU 强调色", "type": "color"},
+                {"key": "accent_gpu", "label": "GPU 强调色", "type": "color"},
+                {"key": "accent_mem", "label": "内存强调色", "type": "color"},
+                {"key": "accent_pwr", "label": "功率强调色", "type": "color"},
+            ]},
         ],
     },
     {
-        "title": "推流",
-        "icon": _ICON_STREAM,
-        "rows": [
-            {"key": "fps", "label": "帧率上限", "type": "num",
-             "min": 0, "max": 120, "step": 1, "unit": "fps"},
-            {"key": "partial", "label": "局部更新", "type": "bool"},
-            {"key": "text_period", "label": "数值刷新间隔", "type": "num",
-             "min": 0.1, "max": 10, "step": 0.1, "unit": "s"},
-            {"key": "fps_period", "label": "帧率刷新间隔", "type": "num",
-             "min": 0.1, "max": 5, "step": 0.1, "unit": "s"},
-        ],
-    },
-    {
-        "title": "文字动效",
-        "icon": _ICON_TEXT,
-        "rows": [
-            {"key": "roll", "label": "数值滚动", "type": "bool"},
-            {"key": "roll_speed", "label": "滚动速度", "type": "num",
-             "min": 0.5, "max": 10, "step": 0.1, "unit": "次/s"},
+        "title": "画面",
+        "icon": _ICON_LOOK,
+        "sections": [
+            {"caption": "显示调节", "rows": [
+                {"key": "brightness", "label": "整体亮度", "type": "num",
+                 "min": 0, "max": 2, "step": 0.05, "unit": "×"},
+                {"key": "saturation", "label": "饱和度", "type": "num",
+                 "min": 0, "max": 2, "step": 0.05, "unit": "×"},
+                {"key": "glass", "label": "玻璃质感", "type": "num",
+                 "min": 0, "max": 2, "step": 0.05, "unit": "×"},
+                {"key": "bg_brightness", "label": "背景亮度", "type": "num",
+                 "min": 0, "max": 1.5, "step": 0.05, "unit": "×"},
+            ]},
+            {"caption": "指标显隐", "rows": [
+                {"key": "show_mem", "label": "显示内存", "type": "bool"},
+                {"key": "show_power", "label": "显示功率", "type": "bool"},
+                {"key": "show_fps", "label": "显示帧率", "type": "bool"},
+            ]},
+            {"caption": "屏幕顶栏", "rows": [
+                {"key": "top_left", "label": "左上角内容", "type": "enum",
+                 "options": [["board", "主板芯片组"], ["host", "主机名"]]},
+                {"key": "clock_24h", "label": "24 小时制", "type": "bool"},
+                {"key": "clock_seconds", "label": "时钟显示秒", "type": "bool"},
+                {"key": "show_net", "label": "显示网速", "type": "bool"},
+            ]},
         ],
     },
     {
         "title": "背景",
         "icon": _ICON_BG,
-        "rows": [
-            {"key": "bg_color_top", "label": "顶部颜色", "type": "color"},
-            {"key": "bg_color_mid", "label": "中部颜色", "type": "color"},
-            {"key": "bg_color_bot", "label": "底部颜色", "type": "color"},
-            {"key": "bg_image", "label": "背景图片", "type": "file"},
-            {"key": "bg_image_blur", "label": "图片模糊", "type": "num",
-             "min": 0, "max": 40, "step": 1, "unit": "px"},
-            {"key": "bg_image_brightness", "label": "图片亮度", "type": "num",
-             "min": 0, "max": 2, "step": 0.05, "unit": "×"},
+        "sections": [
+            {"caption": "来源", "rows": [
+                {"key": "bg_mode", "label": "背景来源", "type": "enum",
+                 "options": [["auto", "自动"], ["gradient", "纯渐变"],
+                             ["image", "图片"]]},
+            ]},
+            {"caption": "渐变", "when": {"key": "bg_mode", "neq": "image"},
+             "rows": [
+                 {"key": "bg_color_top", "label": "顶部颜色", "type": "color"},
+                 {"key": "bg_color_mid", "label": "中部颜色", "type": "color"},
+                 {"key": "bg_color_bot", "label": "底部颜色", "type": "color"},
+             ]},
+            {"caption": "图片", "when": {"key": "bg_mode", "neq": "gradient"},
+             "rows": [
+                 {"key": "bg_image", "label": "背景图片", "type": "file"},
+                 {"key": "bg_image_blur", "label": "图片模糊", "type": "num",
+                  "min": 0, "max": 40, "step": 1, "unit": "px"},
+                 {"key": "bg_image_brightness", "label": "图片亮度", "type": "num",
+                  "min": 0, "max": 2, "step": 0.05, "unit": "×"},
+             ]},
         ],
     },
     {
-        "title": "外观",
-        "icon": _ICON_LOOK,
-        "rows": [
-            {"key": "brightness", "label": "亮度", "type": "num",
-             "min": 0, "max": 2, "step": 0.05, "unit": "×"},
-            {"key": "bg_brightness", "label": "背景亮度", "type": "num",
-             "min": 0, "max": 1.5, "step": 0.05, "unit": "×"},
-            {"key": "saturation", "label": "饱和度", "type": "num",
-             "min": 0, "max": 2, "step": 0.05, "unit": "×"},
-            {"key": "glass", "label": "玻璃质感", "type": "num",
-             "min": 0, "max": 2, "step": 0.05, "unit": "×"},
-            {"key": "accent_cpu", "label": "CPU 强调色", "type": "color"},
-            {"key": "accent_gpu", "label": "GPU 强调色", "type": "color"},
-            {"key": "accent_mem", "label": "内存强调色", "type": "color"},
-            {"key": "accent_pwr", "label": "功率强调色", "type": "color"},
-            {"key": "show_mem", "label": "显示内存", "type": "bool"},
-            {"key": "show_power", "label": "显示功率", "type": "bool"},
-            {"key": "show_fps", "label": "显示帧率", "type": "bool"},
+        "title": "动效与推流",
+        "icon": _ICON_STREAM,
+        "sections": [
+            {"caption": "推流", "rows": [
+                {"key": "fps", "label": "帧率上限", "type": "num",
+                 "min": 0, "max": 120, "step": 1, "unit": "fps"},
+                {"key": "partial", "label": "局部更新", "type": "bool"},
+                {"key": "text_period", "label": "数值刷新间隔", "type": "num",
+                 "min": 0.1, "max": 10, "step": 0.1, "unit": "s"},
+                {"key": "fps_period", "label": "帧率刷新间隔", "type": "num",
+                 "min": 0.1, "max": 5, "step": 0.1, "unit": "s"},
+            ]},
+            {"caption": "文字动效", "rows": [
+                {"key": "roll", "label": "数值滚动", "type": "bool"},
+                {"key": "roll_speed", "label": "滚动速度", "type": "num",
+                 "min": 0.5, "max": 10, "step": 0.1, "unit": "次/s"},
+            ]},
         ],
     },
     {
-        "title": "面板",
+        "title": "系统",
         "icon": _ICON_PANEL,
-        "rows": [
-            {"key": "ui_port", "label": "面板端口", "type": "port"},
-            {"key": "open_browser", "label": "启动时打开浏览器", "type": "bool"},
-        ],
-    },
-    {
-        "title": "外部工具",
-        "icon": _ICON_TOOL,
-        "rows": [
-            {"key": "presentmon_path", "label": "PresentMon 路径", "type": "text"},
+        "sections": [
+            {"caption": "", "rows": [
+                {"key": "ui_port", "label": "面板端口", "type": "port"},
+                {"key": "open_browser", "label": "启动时打开浏览器", "type": "bool"},
+                {"key": "presentmon_path", "label": "PresentMon 路径", "type": "text"},
+            ]},
         ],
     },
 ]
@@ -223,14 +270,22 @@ _PAGE = r"""<!DOCTYPE html>
 <title>系统监测器</title>
 <style>
   :root{
-    --bg:#0b0f17; --card:rgba(255,255,255,.06); --card-line:rgba(255,255,255,.09);
-    --sep:rgba(255,255,255,.06); --text:#f4f7fc; --muted:#8b93a3;
-    --accent:#38bdf8; --accent-2:#a78bfa; --danger:#f87171; --success:#34d399;
-    --warn:#fbbf24; --faint:#6b7385;
-    --r-card:18px; --r-ctl:12px;
+    --bg:#0b0f17; --text:#f4f7fc; --muted:#8b93a3;
+    --accent:#38bdf8; --danger:#f87171; --success:#34d399; --warn:#fbbf24;
+    --faint:#6b7385;
+    /* one raised surface and one hairline; everything below is built from them */
+    --surface:rgba(255,255,255,.045);
+    --hair:rgba(255,255,255,.055);
+    /* Light neumorphism is a deep outer shadow paired with a single top
+       highlight. The classic pale outer shadow is invisible on a near-black
+       backdrop, so only those two halves of it survive -- which is the look
+       wanted anyway. Two elevations only: raised (--e1/--e2) and sunken. */
+    --e1:0 1px 2px rgba(0,0,0,.45),0 8px 20px -6px rgba(0,0,0,.55);
+    --e2:0 2px 4px rgba(0,0,0,.5),0 16px 36px -10px rgba(0,0,0,.62);
+    --hi:inset 0 1px 0 rgba(255,255,255,.07);
+    --sink:inset 0 2px 5px rgba(0,0,0,.5),inset 0 -1px 0 rgba(255,255,255,.05);
+    --r-lg:20px; --r-md:14px; --r-sw:11px; --r-pill:999px;
     --ease:cubic-bezier(.22,.7,.25,1);
-    --shadow:0 10px 26px rgba(0,0,0,.34);
-    --hi:inset 0 1px 0 rgba(255,255,255,.06);
     --font:-apple-system,"SF Pro Text","SF Pro Display","PingFang SC",
            "Microsoft YaHei UI","Segoe UI",system-ui,sans-serif;
   }
@@ -242,10 +297,6 @@ _PAGE = r"""<!DOCTYPE html>
     font-size:15px; line-height:1.45;
     -webkit-font-smoothing:antialiased;
     font-variant-numeric:tabular-nums;
-    background-image:
-      radial-gradient(120% 70% at 50% -10%, rgba(56,189,248,.10), transparent 60%),
-      radial-gradient(90% 60% at 100% 0%, rgba(167,139,250,.07), transparent 55%);
-    background-attachment:fixed;
   }
   svg{display:block}
 
@@ -263,19 +314,18 @@ _PAGE = r"""<!DOCTYPE html>
   /* ---- pinned top area (brand row + stats) ---- */
   .topbar{
     flex:0 0 auto;z-index:15;padding:0 22px;
-    background:linear-gradient(180deg,rgba(14,19,30,.95),rgba(11,15,23,.80));
-    backdrop-filter:saturate(150%) blur(18px);
-    border-bottom:1px solid var(--sep);
-    box-shadow:0 1px 0 rgba(255,255,255,.03),0 10px 26px rgba(0,0,0,.28);
+    background:var(--bg);
+    border-bottom:1px solid var(--hair);
+    box-shadow:0 12px 26px -16px rgba(0,0,0,.75);
   }
   .top{display:flex;align-items:center;gap:14px;padding:15px 0 11px}
   .brand{display:flex;align-items:center;gap:13px;min-width:0}
+  /* a raised tile rather than a glowing badge: the accent lives in the glyph */
   .brand-icon{
-    width:44px;height:44px;flex:0 0 auto;border-radius:14px;
+    width:44px;height:44px;flex:0 0 auto;border-radius:var(--r-md);
     display:flex;align-items:center;justify-content:center;color:var(--accent);
-    background:linear-gradient(160deg,rgba(56,189,248,.24),rgba(56,189,248,.05));
-    border:1px solid rgba(56,189,248,.30);
-    box-shadow:0 6px 18px rgba(56,189,248,.16),inset 0 1px 0 rgba(255,255,255,.10);
+    background:var(--surface);border:1px solid var(--hair);
+    box-shadow:var(--e1),var(--hi);
   }
   .brand-icon svg{width:24px;height:24px}
   .brand h1{font-size:19px;font-weight:640;letter-spacing:.2px;margin:0}
@@ -283,23 +333,23 @@ _PAGE = r"""<!DOCTYPE html>
     text-overflow:ellipsis;white-space:nowrap;max-width:190px}
   .spacer{flex:1 1 auto}
   .pill{
-    display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:999px;
+    display:inline-flex;align-items:center;gap:7px;padding:7px 14px;
+    border-radius:var(--r-pill);
     font-size:12.5px;font-weight:560;color:var(--muted);
-    background:rgba(255,255,255,.06);border:1px solid var(--card-line);
+    background:var(--surface);border:1px solid var(--hair);
     white-space:nowrap;box-shadow:var(--hi);
-    transition:color .25s,border-color .25s,background .25s,box-shadow .25s;
+    transition:color .25s,border-color .25s,background .25s;
   }
   .pill .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);
-    box-shadow:0 0 0 3px rgba(139,147,163,.12);transition:background .25s,box-shadow .25s}
-  .pill.online{color:var(--success);border-color:rgba(52,211,153,.32);
-    background:rgba(52,211,153,.10);
-    box-shadow:0 4px 14px rgba(52,211,153,.15),inset 0 1px 0 rgba(255,255,255,.07)}
-  .pill.online .dot{background:var(--success);box-shadow:0 0 0 3px rgba(52,211,153,.18);
+    transition:background .25s}
+  .pill.online{color:var(--success);border-color:rgba(52,211,153,.30);
+    background:rgba(52,211,153,.09)}
+  .pill.online .dot{background:var(--success);
     animation:beat 2.6s ease-in-out infinite}
   .pill.offline{color:var(--muted)}
   @keyframes beat{0%,100%{opacity:1}50%{opacity:.4}}
 
-  /* ---- stats ---- */
+  /* ---- stats: the same raised tile as everywhere else, no glow ---- */
   .stats{
     display:grid;grid-template-columns:repeat(6,minmax(0,1fr));
     gap:10px;padding-bottom:13px;
@@ -307,10 +357,10 @@ _PAGE = r"""<!DOCTYPE html>
   .stat{
     --c:#38bdf8;
     position:relative;min-width:0;overflow:hidden;
-    background:var(--card);border:1px solid var(--card-line);border-radius:var(--r-card);
+    background:var(--surface);border:1px solid var(--hair);
+    border-radius:var(--r-md);
     padding:11px 13px 10px;
-    background-image:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,0));
-    box-shadow:var(--hi);transition:border-color .3s,box-shadow .3s;
+    box-shadow:var(--e1),var(--hi);transition:border-color .3s;
   }
   .stat-label{
     display:flex;align-items:center;gap:6px;
@@ -319,7 +369,7 @@ _PAGE = r"""<!DOCTYPE html>
   }
   .stat-label::before{
     content:"";flex:0 0 auto;width:6px;height:6px;border-radius:50%;
-    background:var(--c);box-shadow:0 0 8px var(--c);opacity:.9;
+    background:var(--c);opacity:.9;
   }
   .stat-num-row{display:flex;align-items:baseline;gap:4px;margin-top:7px}
   .stat-num{font-size:24px;font-weight:640;letter-spacing:-.4px;line-height:1;
@@ -332,31 +382,32 @@ _PAGE = r"""<!DOCTYPE html>
   .body{flex:1 1 auto;min-height:0;display:flex;padding:20px 22px 0}
   .side{
     flex:0 0 208px;display:flex;flex-direction:column;gap:3px;
-    overflow-y:auto;padding:2px 18px 14px 0;border-right:1px solid var(--sep);
+    overflow-y:auto;padding:2px 18px 14px 0;border-right:1px solid var(--hair);
   }
   .navitem{
     position:relative;display:flex;align-items:center;gap:11px;width:100%;flex:0 0 auto;
     font-family:var(--font);font-size:14.5px;font-weight:560;color:var(--muted);
-    background:transparent;border:1px solid transparent;border-radius:var(--r-ctl);
+    background:transparent;border:1px solid transparent;border-radius:var(--r-md);
     padding:11px 13px;cursor:pointer;text-align:left;white-space:nowrap;
-    transition:color .2s,background .2s,border-color .2s,box-shadow .2s,transform .2s var(--ease);
+    transition:color .2s,background .2s,border-color .2s,transform .2s var(--ease);
   }
   .navitem .navicon{width:20px;height:20px;flex:0 0 auto;display:flex;
     align-items:center;justify-content:center;transition:color .2s}
   .navitem .navicon svg{width:18px;height:18px}
-  .navitem:hover{color:var(--text);background:rgba(255,255,255,.05)}
+  .navitem:hover{color:var(--text);background:rgba(255,255,255,.04)}
   .navitem:active{transform:scale(.985)}
+  /* the active entry is a sunken well with one accent rail -- no glow and no
+     gradient fill, which was where most of the accent budget used to go */
   .navitem.on{
     color:var(--text);
-    background:linear-gradient(90deg,rgba(56,189,248,.16),rgba(56,189,248,.04));
-    border-color:rgba(56,189,248,.30);
-    box-shadow:0 6px 18px rgba(56,189,248,.13),var(--hi);
+    background:var(--surface);
+    border-color:var(--hair);
+    box-shadow:var(--sink);
   }
   .navitem.on .navicon{color:var(--accent)}
   .navitem.on::after{
     content:"";position:absolute;left:-1px;top:50%;transform:translateY(-50%);
     width:3px;height:18px;border-radius:0 3px 3px 0;background:var(--accent);
-    box-shadow:0 0 10px rgba(56,189,248,.7);
   }
   .navitem:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(56,189,248,.30)}
   .content{
@@ -379,134 +430,147 @@ _PAGE = r"""<!DOCTYPE html>
     background:rgba(255,255,255,.24);background-clip:content-box;
   }
   .card{
-    background:var(--card);border:1px solid var(--card-line);border-radius:var(--r-card);
-    overflow:hidden;backdrop-filter:saturate(150%) blur(2px);
-    box-shadow:var(--shadow),var(--hi);
+    background:var(--surface);border:1px solid var(--hair);
+    border-radius:var(--r-lg);
+    overflow:hidden;
+    box-shadow:var(--e2),var(--hi);
   }
+  /* caption above a group's controls: it is what lets a dozen related rows stay
+     in one nav entry instead of splitting into their own. Padded to line up with
+     the row labels below it. */
+  .card-cap{
+    padding:13px 16px 0;font-size:11.5px;font-weight:580;letter-spacing:.6px;
+    color:var(--faint);
+  }
+  .card + .card{margin-top:18px}
+  .card[hidden]{display:none}
   .row{position:relative;display:flex;align-items:center;gap:12px;padding:13px 16px;
     transition:background .2s}
   .row + .row::before{
-    content:"";position:absolute;top:0;left:16px;right:16px;height:1px;background:var(--sep);
+    content:"";position:absolute;top:0;left:16px;right:16px;height:1px;background:var(--hair);
   }
-  .row:hover{background:rgba(255,255,255,.028)}
+  .row:hover{background:rgba(255,255,255,.022)}
   .row .label{font-size:15px;color:var(--text)}
   .row.row-col{flex-direction:column;align-items:stretch;gap:12px}
   .row-head{display:flex;align-items:center;gap:10px}
+  /* a neutral raised pill: the accent is reserved for the nav rail, the primary
+     button and the checked states */
   .row-head .value{
     display:inline-flex;align-items:baseline;font-size:13px;font-weight:620;
-    color:#bfe9ff;background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.22);
-    border-radius:999px;padding:3px 11px;font-variant-numeric:tabular-nums;
-    box-shadow:var(--hi);transition:background .2s;
+    color:var(--text);background:var(--surface);border:1px solid var(--hair);
+    border-radius:var(--r-pill);padding:3px 11px;font-variant-numeric:tabular-nums;
+    box-shadow:var(--hi);
   }
   .row-head .value i{font-style:normal;font-size:11px;color:var(--muted);margin-left:4px}
 
-  /* ---- toggle ---- */
+  /* ---- toggle: a sunken well with a physically raised knob; solid accent
+     when on, no gradient and no glow ---- */
   .switch{position:relative;display:inline-block;width:51px;height:31px;flex:0 0 auto}
   .switch input{position:absolute;opacity:0;width:0;height:0;margin:0}
   .switch .track{
-    position:absolute;inset:0;border-radius:999px;background:rgba(255,255,255,.16);
-    box-shadow:inset 0 1px 2px rgba(0,0,0,.28);
-    transition:background .3s cubic-bezier(.4,0,.2,1),box-shadow .3s;
+    position:absolute;inset:0;border-radius:var(--r-pill);
+    background:rgba(0,0,0,.28);
+    box-shadow:var(--sink);
+    transition:background .3s cubic-bezier(.4,0,.2,1);
   }
   .switch .track::after{
     content:"";position:absolute;top:2px;left:2px;width:27px;height:27px;border-radius:50%;
-    background:linear-gradient(180deg,#fff,#eef4fb);
-    box-shadow:0 2px 6px rgba(0,0,0,.42),0 0 0 .5px rgba(0,0,0,.06);
+    background:linear-gradient(180deg,#fff,#e9f1fa);
+    box-shadow:0 2px 6px rgba(0,0,0,.5),0 0 0 .5px rgba(0,0,0,.12);
     transition:transform .3s cubic-bezier(.4,0,.2,1),box-shadow .25s;
   }
   .switch:hover .track::after{
-    box-shadow:0 2px 9px rgba(0,0,0,.5),0 0 0 .5px rgba(0,0,0,.06);
+    box-shadow:0 3px 10px rgba(0,0,0,.58),0 0 0 .5px rgba(0,0,0,.12);
   }
-  .switch input:checked + .track{
-    background:linear-gradient(135deg,#38bdf8,#0ea5e9);
-    box-shadow:0 4px 14px rgba(56,189,248,.35),inset 0 1px 0 rgba(255,255,255,.28);
-  }
+  .switch input:checked + .track{background:var(--accent)}
   .switch input:checked + .track::after{transform:translateX(20px)}
-  .switch input:focus-visible + .track{box-shadow:0 0 0 3px rgba(56,189,248,.30)}
+  .switch input:focus-visible + .track{
+    outline:2px solid rgba(56,189,248,.55);outline-offset:2px;
+  }
 
-  /* ---- range: the bar is the input's own background-image, sized to 5px so it
-     always reads as a slim track (gradient fill + dim remainder) ---- */
+  /* ---- range: a sunken 5px groove with a raised knob. The filled part is the
+     input's own background-image (see paintRange), kept flat on purpose ---- */
   input[type=range]{
     -webkit-appearance:none;appearance:none;width:100%;height:24px;margin:0;
     background-color:transparent;background-repeat:no-repeat;
     background-position:center;background-size:100% 5px;
-    cursor:pointer;
+    cursor:pointer;border-radius:var(--r-pill);
   }
   input[type=range]:focus-visible{outline:none}
   input[type=range]::-webkit-slider-runnable-track{
-    height:5px;border-radius:999px;background:transparent;
+    height:5px;border-radius:var(--r-pill);background:transparent;
   }
   input[type=range]::-webkit-slider-thumb{
-    -webkit-appearance:none;appearance:none;width:20px;height:20px;border-radius:50%;
-    margin-top:-7.5px;
-    background:radial-gradient(circle at 50% 32%,#ffffff,#e8f3ff 68%,#d8e9fb);
-    box-shadow:0 2px 7px rgba(0,0,0,.5),0 0 0 .5px rgba(0,0,0,.14),
-      0 0 0 4px rgba(56,189,248,.10);
+    -webkit-appearance:none;appearance:none;width:19px;height:19px;border-radius:50%;
+    margin-top:-7px;
+    background:linear-gradient(180deg,#ffffff,#e6f0fa);
+    box-shadow:0 2px 6px rgba(0,0,0,.55),0 0 0 .5px rgba(0,0,0,.16);
     transition:transform .16s var(--ease),box-shadow .22s;
   }
   input[type=range]:hover::-webkit-slider-thumb{
-    box-shadow:0 3px 9px rgba(0,0,0,.5),0 0 0 .5px rgba(0,0,0,.14),
-      0 0 0 6px rgba(56,189,248,.20);
+    box-shadow:0 3px 9px rgba(0,0,0,.6),0 0 0 .5px rgba(0,0,0,.16);
   }
   input[type=range]:active::-webkit-slider-thumb{transform:scale(1.10)}
   input[type=range]:focus-visible::-webkit-slider-thumb{
-    box-shadow:0 2px 8px rgba(0,0,0,.5),0 0 0 6px rgba(56,189,248,.32);
+    box-shadow:0 2px 6px rgba(0,0,0,.55),0 0 0 3px rgba(56,189,248,.45);
   }
   input[type=range]::-moz-range-track{
-    height:5px;border-radius:999px;background:rgba(255,255,255,.11);
+    height:5px;border-radius:var(--r-pill);background:rgba(255,255,255,.10);
   }
   input[type=range]::-moz-range-progress{
-    height:5px;border-radius:999px;background:linear-gradient(90deg,#5ecbff,#0ea5e9);
+    height:5px;border-radius:var(--r-pill);background:#38bdf8;
   }
   input[type=range]::-moz-range-thumb{
     width:19px;height:19px;border:none;border-radius:50%;
-    background:radial-gradient(circle at 50% 32%,#ffffff,#e8f3ff 68%,#d8e9fb);
-    box-shadow:0 2px 7px rgba(0,0,0,.5);
+    background:linear-gradient(180deg,#ffffff,#e6f0fa);
+    box-shadow:0 2px 6px rgba(0,0,0,.55);
   }
 
-  /* ---- segmented control: capsule buttons in a sunken track ---- */
+  /* ---- segmented control: capsule buttons in a sunken track; the picked one
+     is a neutral raised chip carrying the accent in its text only ---- */
   .seg{
-    display:inline-flex;gap:3px;padding:3px;border-radius:999px;flex:0 0 auto;
-    background:rgba(0,0,0,.30);box-shadow:inset 0 1px 2px rgba(0,0,0,.34);
+    display:inline-flex;gap:3px;padding:3px;border-radius:var(--r-pill);
+    flex:0 0 auto;
+    background:rgba(0,0,0,.28);box-shadow:var(--sink);
   }
   .seg-btn{
     font-family:var(--font);font-size:13px;font-weight:560;color:var(--muted);
-    padding:6px 15px;border:none;border-radius:999px;cursor:pointer;
+    padding:6px 15px;border:none;border-radius:var(--r-pill);cursor:pointer;
     background:transparent;white-space:nowrap;
     transition:color .2s,background .25s,box-shadow .25s;
   }
   .seg-btn:hover{color:var(--text)}
   .seg-btn.on{
-    color:#f4fbff;background:linear-gradient(135deg,#38bdf8,#0ea5e9);
-    box-shadow:0 2px 8px rgba(56,189,248,.35),inset 0 1px 0 rgba(255,255,255,.28);
+    color:var(--accent);background:var(--surface);
+    box-shadow:var(--e1),var(--hi);
   }
   .seg-btn:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(56,189,248,.30)}
 
   /* ---- colour: a swatch that opens an HSV picker popover ---- */
   .swatch{
-    width:34px;height:34px;padding:0;border-radius:11px;cursor:pointer;
-    border:1px solid rgba(255,255,255,.22);background:none;
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.30),0 2px 8px rgba(0,0,0,.45);
+    width:34px;height:34px;padding:0;border-radius:var(--r-sw);cursor:pointer;
+    border:1px solid rgba(255,255,255,.20);background:none;
+    box-shadow:0 2px 8px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.18);
     transition:transform .12s ease,box-shadow .16s ease;
   }
   .swatch:hover{
     transform:translateY(-1px);
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.38),0 4px 12px rgba(0,0,0,.5);
+    box-shadow:0 4px 12px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.26);
   }
-  .swatch i{display:block;width:100%;height:100%;border-radius:10px}
+  .swatch i{display:block;width:100%;height:100%;border-radius:calc(var(--r-sw) - 1px)}
   .hexval{
     font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums;
     letter-spacing:.3px;margin-right:11px;
   }
   .picker{
     position:fixed;z-index:90;width:236px;padding:14px;display:none;
-    border-radius:16px;border:1px solid var(--card-line);
-    background:rgba(17,21,29,.94);backdrop-filter:blur(20px);
-    box-shadow:0 20px 48px rgba(0,0,0,.62),var(--hi);
+    border-radius:var(--r-lg);border:1px solid var(--hair);
+    background:rgba(17,21,29,.96);
+    box-shadow:var(--e2);
   }
   .picker.open{display:block}
   .picker-sv{
-    position:relative;height:130px;border-radius:11px;cursor:crosshair;
+    position:relative;height:130px;border-radius:var(--r-md);cursor:crosshair;
     box-shadow:inset 0 0 0 1px rgba(255,255,255,.16);
   }
   .picker-dot{
@@ -515,7 +579,8 @@ _PAGE = r"""<!DOCTYPE html>
     box-shadow:0 0 0 1px rgba(0,0,0,.45),0 1px 5px rgba(0,0,0,.6);
   }
   .picker-hue{
-    position:relative;height:13px;border-radius:7px;margin-top:12px;cursor:pointer;
+    position:relative;height:13px;border-radius:var(--r-pill);margin-top:12px;
+    cursor:pointer;
     background:linear-gradient(to right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00);
     box-shadow:inset 0 0 0 1px rgba(255,255,255,.16);
   }
@@ -526,8 +591,8 @@ _PAGE = r"""<!DOCTYPE html>
   }
   .picker-hex{
     width:100%;margin-top:12px;font-family:var(--font);font-size:13.5px;
-    color:var(--text);background:rgba(0,0,0,.3);border:1px solid var(--card-line);
-    border-radius:9px;padding:8px 10px;outline:none;
+    color:var(--text);background:rgba(0,0,0,.3);border:1px solid var(--hair);
+    border-radius:var(--r-sw);padding:8px 10px;outline:none;
     font-variant-numeric:tabular-nums;letter-spacing:.4px;
   }
   .picker-hex:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(56,189,248,.18)}
@@ -540,14 +605,15 @@ _PAGE = r"""<!DOCTYPE html>
   }
   .picker-presets button:hover{transform:translateY(-1px)}
 
-  /* ---- text / port ---- */
+  /* ---- text / port: a sunken field ---- */
   input.input{
     font-family:var(--font);font-size:14.5px;color:var(--text);
-    background:rgba(0,0,0,.28);border:1px solid var(--card-line);border-radius:var(--r-ctl);
+    background:rgba(0,0,0,.28);border:1px solid var(--hair);
+    border-radius:var(--r-sw);
     padding:8px 12px;width:150px;text-align:right;outline:none;
     transition:border-color .2s,box-shadow .2s;font-variant-numeric:tabular-nums;
   }
-  input.input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(56,189,248,.2)}
+  input.input:focus{border-color:var(--accent);box-shadow:var(--sink)}
   /* long values (e.g. an executable path) need room to stay readable */
   .row-wide input.input{width:min(420px,58%);text-align:left}
 
@@ -559,24 +625,23 @@ _PAGE = r"""<!DOCTYPE html>
   }
   .row-wide .path.empty{color:var(--faint);direction:ltr}
   .btn.small{
-    padding:9px 15px;font-size:13.5px;font-weight:580;border-radius:999px;
-    color:#bfe9ff;background:rgba(56,189,248,.13);
-    border:1px solid rgba(56,189,248,.28);box-shadow:var(--hi);
+    padding:9px 15px;font-size:13.5px;font-weight:580;border-radius:var(--r-pill);
+    color:var(--text);background:var(--surface);
+    border:1px solid var(--hair);box-shadow:var(--hi);
   }
-  .btn.small:hover{background:rgba(56,189,248,.22)}
-  .btn.small.ghost{color:var(--muted);background:rgba(255,255,255,.06);
-    border-color:var(--card-line)}
-  .btn.small.ghost:hover{color:var(--text);background:rgba(255,255,255,.12)}
+  .btn.small:hover{background:rgba(255,255,255,.10)}
+  .btn.small.ghost{color:var(--muted)}
+  .btn.small.ghost:hover{color:var(--text);background:rgba(255,255,255,.10)}
   .btn.small[disabled]{opacity:.55;pointer-events:none}
 
   /* ---- crop preview: drag to pan, slider to zoom, 320:170 window ---- */
   .crop{display:flex;flex-direction:column;gap:11px}
   .crop-view{
     position:relative;overflow:hidden;width:100%;max-width:320px;
-    aspect-ratio:320/170;border-radius:12px;background:rgba(0,0,0,.35);
-    border:1px solid var(--card-line);
+    aspect-ratio:320/170;border-radius:var(--r-md);background:rgba(0,0,0,.35);
+    border:1px solid var(--hair);
     cursor:grab;touch-action:none;
-    box-shadow:inset 0 0 0 1px rgba(0,0,0,.25),var(--hi);
+    box-shadow:var(--sink);
   }
   .crop-view:active{cursor:grabbing}
   .crop-view img{
@@ -587,9 +652,9 @@ _PAGE = r"""<!DOCTYPE html>
   .crop-ctl input[type=range]{flex:1 1 auto}
   .crop-ctl .value{
     display:inline-flex;align-items:baseline;font-size:13px;font-weight:620;
-    color:#bfe9ff;background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.22);
-    border-radius:999px;padding:3px 11px;font-variant-numeric:tabular-nums;
-    box-shadow:var(--hi);white-space:nowrap;
+    color:var(--text);background:var(--surface);border:1px solid var(--hair);
+    border-radius:var(--r-pill);padding:3px 11px;
+    font-variant-numeric:tabular-nums;box-shadow:var(--hi);white-space:nowrap;
   }
   .crop-ctl .value i{font-style:normal;font-size:11px;color:var(--muted);margin-left:4px}
   .crop-hint{font-size:12px;color:var(--faint);margin-top:-3px}
@@ -599,43 +664,42 @@ _PAGE = r"""<!DOCTYPE html>
     flex:0 0 auto;
     display:flex;justify-content:center;gap:12px;
     padding:13px 22px calc(13px + env(safe-area-inset-bottom));
-    background:rgba(11,15,23,.92);
-    backdrop-filter:blur(14px);
-    border-top:1px solid var(--sep);
+    background:var(--bg);
+    border-top:1px solid var(--hair);
   }
   .actionbar-inner{display:flex;gap:12px;width:100%}
   .btn{
     font-family:var(--font);font-size:15px;font-weight:600;color:var(--text);
-    border-radius:999px;border:1px solid transparent;cursor:pointer;
+    border-radius:var(--r-pill);border:1px solid transparent;cursor:pointer;
     padding:13px 22px;transition:transform .18s cubic-bezier(.4,0,.2,1),filter .2s,
-      background .2s,box-shadow .2s;
+      background .2s;
   }
   .btn:active{transform:scale(.965)}
   .btn.primary{
     flex:1 1 auto;color:#04121c;border:none;
-    background:linear-gradient(135deg,#5ecbff,#38bdf8 45%,#0ea5e9);
-    box-shadow:0 8px 22px rgba(56,189,248,.32),inset 0 1px 0 rgba(255,255,255,.35);
+    background:var(--accent);
+    box-shadow:0 8px 20px -10px rgba(0,0,0,.8),inset 0 1px 0 rgba(255,255,255,.25);
   }
   .btn.primary:hover{filter:brightness(1.06)}
   .btn.primary[disabled]{opacity:.6;pointer-events:none}
   .btn.ghost{
-    flex:0 0 auto;color:var(--text);background:rgba(255,255,255,.07);
-    border-color:var(--card-line);box-shadow:var(--hi);
+    flex:0 0 auto;color:var(--text);background:var(--surface);
+    border-color:var(--hair);box-shadow:var(--hi);
   }
-  .btn.ghost:hover{background:rgba(255,255,255,.13)}
-  .btn.ghost:active{background:rgba(255,255,255,.09)}
+  .btn.ghost:hover{background:rgba(255,255,255,.10)}
+  .btn.ghost:active{background:rgba(255,255,255,.06)}
   .btn:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(56,189,248,.40)}
   .btn.primary:focus-visible{
-    box-shadow:0 8px 22px rgba(56,189,248,.32),inset 0 1px 0 rgba(255,255,255,.35),
+    box-shadow:0 8px 20px -10px rgba(0,0,0,.8),inset 0 1px 0 rgba(255,255,255,.25),
       0 0 0 3px rgba(56,189,248,.40);
   }
 
   /* ---- toast ---- */
   #toast{
     position:fixed;left:50%;bottom:96px;transform:translate(-50%,14px);
-    padding:10px 18px;border-radius:999px;font-size:13.5px;font-weight:560;
-    color:var(--text);background:rgba(30,38,52,.96);border:1px solid var(--card-line);
-    box-shadow:0 10px 30px rgba(0,0,0,.5);
+    padding:10px 18px;border-radius:var(--r-pill);font-size:13.5px;font-weight:560;
+    color:var(--text);background:rgba(30,38,52,.96);border:1px solid var(--hair);
+    box-shadow:var(--e2);
     opacity:0;pointer-events:none;transition:opacity .28s,transform .28s;
     z-index:30;white-space:nowrap;
   }
@@ -657,12 +721,15 @@ _PAGE = r"""<!DOCTYPE html>
     .side{
       flex:0 0 auto;flex-direction:row;overflow-x:auto;overflow-y:hidden;
       gap:7px;padding:0 0 10px 0;border-right:none;
-      border-bottom:1px solid var(--sep);scrollbar-width:none;
+      border-bottom:1px solid var(--hair);scrollbar-width:none;
     }
     .side::-webkit-scrollbar{display:none}
     .navitem{width:auto;padding:9px 13px;font-size:13.5px}
     .navitem.on::after{display:none}
     .content{padding:12px 0 16px 0}
+    /* the caption sits tighter once the pane is full width */
+    .card-cap{padding:12px 16px 0}
+    .card + .card{margin-top:14px}
     /* long-value rows stack so the value gets the full width */
     .row-wide{flex-wrap:wrap}
     .row-wide .spacer{display:none}
@@ -731,6 +798,32 @@ _PAGE = r"""<!DOCTYPE html>
   var toastTimer = null;
   var active = 0;
 
+  /* Two registries let a programmatic change repaint the pane in place instead
+     of rebuilding it. SYNC holds one closure per control; SECT_VIS holds the
+     "does this card show at all" tests. Rebuilding the DOM on every preset or
+     reset (which a style swap used to do) also re-attached the crop widget's
+     document listeners once per visit, leaking them one nav switch at a time. */
+  var SYNC = [];
+  var SECT_VIS = [];
+  /* drag state for the crop preview: the document listeners are installed once
+     at start-up and dispatch through here (see the DOMContentLoaded handler) */
+  var CROP = {move:null, up:null};
+
+  function whenOk(w){
+    if(!w){ return true; }
+    var v = String(CFG[w.key] === undefined ? '' : CFG[w.key]);
+    if(w.neq && v === w.neq){ return false; }
+    if(w.eq && v !== w.eq){ return false; }
+    return true;
+  }
+  function refreshVis(){
+    SECT_VIS.forEach(function(v){ v.el.hidden = !whenOk(v.when); });
+  }
+  function syncAll(){
+    SYNC.forEach(function(f){ try{ f(); }catch(e){} });
+    refreshVis();
+  }
+
   /* one colour identity per metric, mirroring the screen; load metrics warn
      (amber) then alarm (red) as they climb */
   var STATS = [
@@ -754,12 +847,15 @@ _PAGE = r"""<!DOCTYPE html>
   function esc(s){ return String(s).replace(/[&<>"]/g, function(c){
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
 
+  /* The filled part of a slider is drawn as the input's own background-image.
+     It is kept one flat colour: a gradient here was one of the last places the
+     accent was being spent on decoration rather than on state. */
   function paintRange(input){
     var min = Number(input.min), max = Number(input.max), v = Number(input.value);
     var pct = max > min ? ((v - min) / (max - min)) * 100 : 0;
     input.style.backgroundImage =
-      'linear-gradient(to right,#5ecbff 0%,#0ea5e9 ' + pct +
-      '%,rgba(255,255,255,.11) ' + pct + '%,rgba(255,255,255,.11) 100%)';
+      'linear-gradient(to right,#38bdf8 0%,#38bdf8 ' + pct +
+      '%,rgba(255,255,255,.10) ' + pct + '%,rgba(255,255,255,.10) 100%)';
   }
 
   function repaintRanges(){
@@ -935,6 +1031,7 @@ _PAGE = r"""<!DOCTYPE html>
       input = $('input', el);
       input.checked = !!CFG[row.key];
       input.addEventListener('change', function(){ CFG[row.key] = input.checked; });
+      SYNC.push(function(){ input.checked = !!CFG[row.key]; });
       return el;
     }
     if(row.type === 'num'){
@@ -949,12 +1046,14 @@ _PAGE = r"""<!DOCTYPE html>
       var d = decimals(row.step);
       input.value = Number(CFG[row.key]);
       var upd = function(){
+        input.value = Number(CFG[row.key]);
         valEl.textContent = num(input.value, d);
         paintRange(input);
       };
       input.addEventListener('input', function(){
         CFG[row.key] = Number(input.value); upd();
       });
+      SYNC.push(upd);
       upd();
       return el;
     }
@@ -970,6 +1069,7 @@ _PAGE = r"""<!DOCTYPE html>
           b.classList.toggle('on', b.getAttribute('data-val') === cur);
         });
       };
+      SYNC.push(paint);
       (row.options || []).forEach(function(opt){
         var b = document.createElement('button');
         b.type = 'button';
@@ -978,7 +1078,13 @@ _PAGE = r"""<!DOCTYPE html>
         b.textContent = opt[1];
         b.addEventListener('click', function(){
           CFG[row.key] = opt[0];
-          paint();
+          /* a palette preset carries the colours it stands for, so one click
+             rewrites every accent and gradient stop together */
+          var preset = row.presets && row.presets[opt[0]];
+          if(preset){
+            Object.keys(preset).forEach(function(k){ CFG[k] = preset[k]; });
+          }
+          syncAll();
           /* a style swap re-bakes the whole chrome, so land it now instead of
              making the switch wait for the next save */
           applyCfg();
@@ -1002,6 +1108,7 @@ _PAGE = r"""<!DOCTYPE html>
         chip.style.background = c;
         hexv.textContent = c;
       };
+      SYNC.push(repaint);
       sw.addEventListener('click', function(e){
         e.stopPropagation();            /* keep the document handler from closing */
         openPicker(row.key, repaint, sw);
@@ -1108,10 +1215,11 @@ _PAGE = r"""<!DOCTYPE html>
       function onUp(){ drag = null; }
       view.addEventListener('mousedown', onDown);
       view.addEventListener('touchstart', onDown, {passive:false});
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-      document.addEventListener('touchmove', onMove, {passive:false});
-      document.addEventListener('touchend', onUp);
+      /* the document-level half of the drag is installed once at start-up and
+         dispatched through CROP, so revisiting this page cannot pile up copies */
+      CROP.move = onMove;
+      CROP.up = onUp;
+      SYNC.push(show);
 
       clearBtn.addEventListener('click', function(){
         CFG[row.key] = ''; show(); toast('已清除，保存后生效');
@@ -1156,6 +1264,7 @@ _PAGE = r"""<!DOCTYPE html>
         ? (parseInt(input.value || '0', 10) || 0)
         : input.value;
     });
+    SYNC.push(function(){ input.value = CFG[row.key]; });
     return el;
   }
 
@@ -1179,16 +1288,31 @@ _PAGE = r"""<!DOCTYPE html>
   function buildContent(){
     var root = $('#content');
     root.innerHTML = '';
+    SYNC.length = 0;
+    SECT_VIS.length = 0;
     var g = SCHEMA[active];
     if(!g){ return; }
     var head = document.createElement('div');
     head.className = 'content-title anim';
     head.innerHTML = (g.icon || '') + '<span>' + esc(g.title) + '</span>';
-    var card = document.createElement('div');
-    card.className = 'card anim';
-    g.rows.forEach(function(row){ card.appendChild(buildRow(row)); });
     root.appendChild(head);
-    root.appendChild(card);
+    (g.sections || []).forEach(function(sec){
+      var card = document.createElement('div');
+      card.className = 'card anim';
+      if(sec.caption){
+        var cap = document.createElement('div');
+        cap.className = 'card-cap';
+        cap.textContent = sec.caption;
+        card.appendChild(cap);
+      }
+      sec.rows.forEach(function(row){ card.appendChild(buildRow(row)); });
+      root.appendChild(card);
+      if(sec.when){ SECT_VIS.push({el: card, when: sec.when}); }
+    });
+    /* each row has already painted itself; only the conditional cards need a
+       first pass, and syncAll would re-run every row (including a fresh
+       backdrop fetch) for nothing */
+    refreshVis();
   }
 
   function select(i){
@@ -1268,7 +1392,12 @@ _PAGE = r"""<!DOCTYPE html>
       body: JSON.stringify(CFG)
     }).then(function(r){ return r.json(); })
       .then(function(d){
-        if(d && d.ok && d.config){ CFG = d.config; }
+        if(d && d.ok && d.config){
+          CFG = d.config;
+          /* the server echoes back what it stored, so re-read it into the
+             controls: anything it coerced or rejected shows up here */
+          if(SYNC.length){ syncAll(); }
+        }
         return !!(d && d.ok);
       });
   }
@@ -1291,7 +1420,9 @@ _PAGE = r"""<!DOCTYPE html>
 
   function reset(){
     CFG = JSON.parse(JSON.stringify(DEFAULTS));
-    buildContent();
+    /* synced in place: a rebuild would drop the scroll position and re-attach
+       the crop widget's listeners all over again */
+    syncAll();
     toast('已恢复默认（未保存）');
   }
 
@@ -1309,6 +1440,16 @@ _PAGE = r"""<!DOCTYPE html>
     poll();
     setInterval(poll, 1000);
     window.addEventListener('resize', repaintRanges);
+    /* the crop preview's drag listeners live here, once, rather than being
+       re-attached every time the background page is rebuilt */
+    document.addEventListener('mousemove', function(e){
+      if(CROP.move){ CROP.move(e); }
+    });
+    document.addEventListener('mouseup', function(){ if(CROP.up){ CROP.up(); } });
+    document.addEventListener('touchmove', function(e){
+      if(CROP.move){ CROP.move(e); }
+    }, {passive:false});
+    document.addEventListener('touchend', function(){ if(CROP.up){ CROP.up(); } });
     /* the popover is anchored to the viewport, so a scroll would leave it
        floating away from its swatch -- close it instead */
     $('#content').addEventListener('scroll', closePicker);
@@ -1332,9 +1473,8 @@ def _render_page(cfg) -> str:
     from .config import Config
 
     defaults = Config().to_dict()
-    schema = [
-        {"title": g["title"], "icon": g["icon"], "rows": g["rows"]} for g in SCHEMA
-    ]
+    schema = [{"title": g["title"], "icon": g["icon"], "sections": g["sections"]}
+              for g in SCHEMA]
     return (
         _PAGE
         .replace("__DEFAULTS_JSON__", _embed(defaults))
