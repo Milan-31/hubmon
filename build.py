@@ -43,6 +43,15 @@ def main():
         "--hidden-import", "cffi",
     ]
 
+    # the app's own icon instead of PyInstaller's stock one; regenerate it with
+    # `python assets/make_icon.py` if assets/hubmon.ico is ever missing
+    icon = os.path.join(ROOT, "assets", "hubmon.ico")
+    if os.path.exists(icon):
+        args += ["--icon", icon]
+        print(f"[build] icon: {icon}")
+    else:
+        print("[build] assets/hubmon.ico missing; the exe keeps the default icon")
+
     # resolve exactly like the app does, so a configured path is bundled too
     presentmon = _presentmon_path(config.load().presentmon_path)
     if presentmon:

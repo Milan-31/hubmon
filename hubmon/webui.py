@@ -115,6 +115,46 @@ _ICON_PANEL = (
     '<path d="M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/>'
     '<circle cx="8" cy="18" r="2"/></svg>'
 )
+# The app icon: a dark tile carrying a lit spectrum, served as the panel's
+# favicon. Source of truth is assets/hubmon.svg; assets/make_icon.py draws the
+# same figure for the executable's .ico. Small enough that inlining it keeps the
+# frozen build self-contained -- no asset file to bundle.
+_ICON_APP = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<defs>'
+    '<linearGradient id="t" x1="0" y1="0" x2="0" y2="1">'
+    '<stop offset="0" stop-color="#1a2331"/><stop offset="1" stop-color="#0a0e16"/>'
+    '</linearGradient>'
+    '<linearGradient id="s" x1="0" y1="0" x2="0" y2="1">'
+    '<stop offset="0" stop-color="#fff" stop-opacity=".16"/>'
+    '<stop offset=".55" stop-color="#fff" stop-opacity="0"/>'
+    '</linearGradient>'
+    '<linearGradient id="b" x1="0" y1="1" x2="0" y2="0">'
+    '<stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#a78bfa"/>'
+    '</linearGradient>'
+    '</defs>'
+    '<rect width="64" height="64" rx="15" fill="url(#t)"/>'
+    '<rect width="64" height="64" rx="15" fill="url(#s)"/>'
+    '<rect x=".75" y=".75" width="62.5" height="62.5" rx="14.25" fill="none"'
+    ' stroke="#fff" stroke-opacity=".14" stroke-width="1.5"/>'
+    '<rect x="7" y="18" width="50" height="28" rx="5.5" fill="#fff" fill-opacity=".04"/>'
+    '<rect x="12" y="42.2" width="40" height="1.6" rx=".8" fill="#fff" fill-opacity=".22"/>'
+    '<g fill="url(#b)">'
+    '<rect x="9" y="33" width="7" height="10" rx="1.8"/>'
+    '<rect x="19" y="26" width="7" height="17" rx="1.8"/>'
+    '<rect x="29" y="36" width="7" height="7" rx="1.8"/>'
+    '<rect x="39" y="29" width="7" height="14" rx="1.8"/>'
+    '<rect x="49" y="31" width="7" height="12" rx="1.8"/>'
+    '</g>'
+    '<g fill="#fff" fill-opacity=".95">'
+    '<rect x="9" y="33" width="7" height="1.6" rx=".8"/>'
+    '<rect x="19" y="26" width="7" height="1.6" rx=".8"/>'
+    '<rect x="29" y="36" width="7" height="1.6" rx=".8"/>'
+    '<rect x="39" y="29" width="7" height="1.6" rx=".8"/>'
+    '<rect x="49" y="31" width="7" height="1.6" rx=".8"/>'
+    '</g>'
+    '</svg>'
+)
 # One-click palettes. A preset rewrites the four metric accents and the three
 # gradient stops together, which is the fiddly bit users otherwise hand-tune one
 # swatch at a time. "default" repeats today's colours exactly, so an existing
@@ -287,6 +327,8 @@ _PAGE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>系统监测器</title>
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.svg">
 <style>
   :root{
     --bg:#0b0f17; --text:#f4f7fc; --muted:#8b93a3;
@@ -1635,6 +1677,8 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/":
                 html = _render_page(self.server.cfg).encode("utf-8")
                 self._respond(200, html, "text/html; charset=utf-8")
+            elif path == "/icon.svg":
+                self._respond(200, _ICON_APP.encode("utf-8"), "image/svg+xml")
             elif path == "/api/config":
                 self._json(200, self.server.cfg.to_dict())
             elif path == "/api/bg-image":

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>hubmon</title>
+  <desc>hubmon monitor -- a dark tile carrying a lit audio spectrum.</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a2331"/>
+      <stop offset="1" stop-color="#0a0e16"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".16"/>
+      <stop offset=".55" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="64" height="64" rx="15" fill="url(#tile)"/>
+  <rect width="64" height="64" rx="15" fill="url(#sheen)"/>
+  <rect x=".75" y=".75" width="62.5" height="62.5" rx="14.25" fill="none"
+        stroke="#ffffff" stroke-opacity=".14" stroke-width="1.5"/>
+
+  <rect x="7" y="18" width="50" height="28" rx="5.5" fill="#ffffff" fill-opacity=".04"/>
+
+  <rect x="12" y="42.2" width="40" height="1.6" rx=".8" fill="#ffffff" fill-opacity=".22"/>
+
+  <g fill="url(#bar)">
+    <rect x="9" y="33" width="7" height="10" rx="1.8"/>
+    <rect x="19" y="26" width="7" height="17" rx="1.8"/>
+    <rect x="29" y="36" width="7" height="7" rx="1.8"/>
+    <rect x="39" y="29" width="7" height="14" rx="1.8"/>
+    <rect x="49" y="31" width="7" height="12" rx="1.8"/>
+  </g>
+
+  <g fill="#ffffff" fill-opacity=".95">
+    <rect x="9" y="33" width="7" height="1.6" rx=".8"/>
+    <rect x="19" y="26" width="7" height="1.6" rx=".8"/>
+    <rect x="29" y="36" width="7" height="1.6" rx=".8"/>
+    <rect x="39" y="29" width="7" height="1.6" rx=".8"/>
+    <rect x="49" y="31" width="7" height="1.6" rx=".8"/>
+  </g>
+</svg>
