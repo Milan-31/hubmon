@@ -141,7 +141,7 @@ def run_stream(cfg, demo=False, log_every=5.0):
     dash = Dashboard(cfg)
 
     state = {"connected": False, "out_fps": 0.0, "kb_s": 0.0,
-             "patches": 0, "frames": 0}
+             "patches": 0, "frames": 0, "hub": {}}
 
     provider = stats_provider(dash, state)
 
@@ -161,7 +161,12 @@ def run_stream(cfg, demo=False, log_every=5.0):
         print("[hubmon] make sure the hub is plugged in and the vendor tool is closed")
         return 2
 
-    state["connected"] = True
+    def _mark_connected():
+        """Note that the panel is up, along with what the panel calls itself."""
+        state["connected"] = True
+        state["hub"] = dict(screen.identity)
+
+    _mark_connected()
 
     stop = {"v": False}
 
@@ -251,7 +256,7 @@ def run_stream(cfg, demo=False, log_every=5.0):
                 prev = None
                 state["connected"] = False
                 if screen.ensure_connected():
-                    state["connected"] = True
+                    _mark_connected()
                     continue
                 time.sleep(1.0)
                 continue
@@ -263,7 +268,7 @@ def run_stream(cfg, demo=False, log_every=5.0):
                 if fails in (1, 5):
                     print(f"[hubmon] usb error ({e}); reconnecting ...")
                 if screen.ensure_connected(retries=1):
-                    state["connected"] = True
+                    _mark_connected()
                     continue
                 time.sleep(1.5)
                 continue

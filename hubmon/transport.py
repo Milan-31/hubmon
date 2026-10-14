@@ -57,6 +57,41 @@ class DeviceNotFound(RuntimeError):
     pass
 
 
+def bcd_str(v):
+    """USB binary-coded-decimal to a dotted version: 0x0105 -> '1.05'.
+
+    Each nibble is one decimal digit, so 0x0231 is 2.31 -- not 2.49, which is
+    what a plain ``%02d`` of the low byte would print.
+    """
+    v = int(v)
+    return "%d.%02d" % ((v >> 8) & 0xFF, ((v >> 4) & 0x0F) * 10 + (v & 0x0F))
+
+
+def read_identity(dev):
+    """The panel's own report of itself, for the control panel's header.
+
+    Everything here comes off the device descriptors, so it costs one round of
+    control transfers at open time and nothing afterwards. String reads are
+    best-effort: a descriptor the firmware left empty, or one Windows refuses,
+    simply drops out of the dict rather than failing the connection.
+    """
+    out = {}
+    for key, attr in (("vendor", "manufacturer"),
+                      ("product", "product"),
+                      ("serial", "serial_number")):
+        try:
+            val = getattr(dev, attr)
+            if val:
+                out[key] = str(val).strip()
+        except Exception:
+            pass
+    try:
+        out["version"] = bcd_str(dev.bcdDevice)
+    except Exception:
+        pass
+    return out
+
+
 class LiveScreen:
     def __init__(self, ack_timeout_ms=250):
         self._dev = None
@@ -64,6 +99,7 @@ class LiveScreen:
         self._backend = _backend()
         self.frames_sent = 0
         self.regions_sent = 0
+        self.identity = {}            # vendor / product / version, read at open
 
     # ------------------------------------------------------------------ open
     def open(self):
@@ -78,6 +114,7 @@ class LiveScreen:
         except Exception:
             pass
         self._dev = dev
+        self.identity = read_identity(dev)
 
     def close(self):
         if self._dev is not None:

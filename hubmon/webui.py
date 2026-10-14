@@ -839,8 +839,8 @@ _PAGE = r"""<!DOCTYPE html>
           </svg>
         </div>
         <div>
-          <h1>系统监测器</h1>
-          <p id="host">本机</p>
+          <h1 id="hub-name">连接中…</h1>
+          <p id="hub-ver">—</p>
         </div>
       </div>
       <div class="spacer"></div>
@@ -1477,8 +1477,19 @@ _PAGE = r"""<!DOCTYPE html>
       el.classList.toggle('hot', hot);
       el.classList.toggle('warn', warn);
     });
-    var hostEl = $('#host');
-    if(stats.host){ hostEl.textContent = stats.host; }
+    /* the header names the hardware, not the app: the hub reports its own
+       vendor and firmware version off the USB descriptors */
+    var hubName = $('#hub-name'), hubVer = $('#hub-ver'), hub = stats.hub || {};
+    if(hub.product || hub.vendor){
+      hubName.textContent = hub.product || hub.vendor;
+      var bits = [];
+      if(hub.vendor && hub.vendor !== (hub.product || '')){ bits.push(hub.vendor); }
+      if(hub.version){ bits.push('v' + hub.version); }
+      hubVer.textContent = bits.join(' · ') || '—';
+    } else {
+      hubName.textContent = stats.connected ? '未识别设备' : '未连接';
+      hubVer.textContent = '—';
+    }
   }
 
   function renderStatus(){
