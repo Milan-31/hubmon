@@ -45,10 +45,11 @@ class Config:
     # ---- look --------------------------------------------------------------
     style: str = "glass"         # "glass" rounded glassmorphism | "quartz"
     theme: str = "default"       # palette preset; rewrites accents + gradient stops
-    top_left: str = "board"      # "board" the chipset | "host" the machine name
+    top_left: str = "board"      # "board" the board model | "host" the machine name
     clock_24h: bool = True       # 24-hour clock; off uses %I (same width)
     clock_seconds: bool = True   # show seconds in the top-bar clock
     show_net: bool = True        # the ↓/↑ rate in the middle of the top bar
+    show_watt: bool = True       # the ~36 W readout inside the CPU/GPU cards
     brightness: float = 1.0
     bg_brightness: float = 0.6   # backdrop dimmer, independent of UI brightness
     saturation: float = 1.0
@@ -60,6 +61,11 @@ class Config:
     show_mem: bool = True
     show_power: bool = True
     show_fps: bool = True
+
+    # ---- audio spectrum ----------------------------------------------------
+    mode: str = "dash"           # "dash" the metric cards | "spectrum"
+    spectrum_style: str = "led"  # "led" matrix | "peak" | "mirror"
+    spectrum_device: str = ""    # "" = the default playback device's loopback
 
     # ---- panel -------------------------------------------------------------
     ui_port: int = 8756

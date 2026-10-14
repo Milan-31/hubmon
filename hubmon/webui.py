@@ -175,6 +175,17 @@ SCHEMA = [
         "title": "画面",
         "icon": _ICON_LOOK,
         "sections": [
+            {"caption": "显示模式", "rows": [
+                {"key": "mode", "label": "显示模式", "type": "enum",
+                 "options": [["dash", "指标仪表盘"], ["spectrum", "音频频谱"]]},
+            ]},
+            {"caption": "音频频谱", "when": {"key": "mode", "eq": "spectrum"},
+             "rows": [
+                 {"key": "spectrum_style", "label": "频谱风格", "type": "enum",
+                  "options": [["led", "LED 点阵柱"], ["peak", "峰值保持"],
+                              ["mirror", "镜像渐变柱"]]},
+                 {"key": "spectrum_device", "label": "采集设备", "type": "text"},
+             ]},
             {"caption": "显示调节", "rows": [
                 {"key": "brightness", "label": "整体亮度", "type": "num",
                  "min": 0, "max": 2, "step": 0.05, "unit": "×"},
@@ -189,10 +200,11 @@ SCHEMA = [
                 {"key": "show_mem", "label": "显示内存", "type": "bool"},
                 {"key": "show_power", "label": "显示功率", "type": "bool"},
                 {"key": "show_fps", "label": "显示帧率", "type": "bool"},
+                {"key": "show_watt", "label": "卡片内瓦数", "type": "bool"},
             ]},
             {"caption": "屏幕顶栏", "rows": [
                 {"key": "top_left", "label": "左上角内容", "type": "enum",
-                 "options": [["board", "主板芯片组"], ["host", "主机名"]]},
+                 "options": [["board", "主板型号"], ["host", "主机名"]]},
                 {"key": "clock_24h", "label": "24 小时制", "type": "bool"},
                 {"key": "clock_seconds", "label": "时钟显示秒", "type": "bool"},
                 {"key": "show_net", "label": "显示网速", "type": "bool"},

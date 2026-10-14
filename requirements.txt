@@ -1,9 +1,10 @@
 # Runtime dependencies for hubmon.
 # Verified with: Python 3.11, psutil 7.2.2, numpy 2.4.6, Pillow 12.3.0,
-# pyusb 1.3.1, libusb-package 1.0.30.0.
+# pyusb 1.3.1, libusb-package 1.0.30.0, soundcard 0.4.6.
 
 psutil>=7.0
 numpy>=2.0
 Pillow>=10.0
 pyusb>=1.2
 libusb-package>=1.0.26
+soundcard>=0.4.6

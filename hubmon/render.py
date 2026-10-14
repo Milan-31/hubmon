@@ -31,6 +31,8 @@ import numpy as np
 from PIL import (Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter,
                  ImageFont, ImageOps)
 
+from .audio import BANDS, FMAX, FMIN
+
 W, H = 320, 170
 
 # ---------------------------------------------------------------- palette ----
@@ -211,43 +213,6 @@ def short_gpu(name: str) -> str:
         return ""
     s = name
     for t in _GPU_NOISE:
-        s = s.replace(t, " ")
-    return re.sub(r"\s+", " ", s).strip(" -")
-
-
-# The panel shows the chipset rather than the whole board name ("Z690M Snow
-# Dream" -> "Z690"), because the chipset is the part that means anything at a
-# glance. Longer variants are listed first so the alternation matches 'B650E'
-# before it can settle for 'B650'.
-_CHIPSETS = (
-    # AMD
-    "TRX50", "TRX40", "WRX90", "WRX80",
-    "X870E", "X870", "X670E", "X670", "B850", "B840", "B650E", "B650",
-    "A620", "X570", "B550", "A520", "X470", "B450", "X370", "B350", "A320",
-    # Intel
-    "Z890", "B860", "H810", "Z790", "Z690", "W680", "H770", "B760", "H670",
-    "B660", "H610", "Z590", "H570", "B560", "H510", "Z490", "B460", "H410",
-    "Z390", "B365", "B360", "H370", "H310", "Z370", "X299", "Z270", "B250",
-    "H270", "Z170", "B150", "H110",
-)
-_CHIPSET_RX = re.compile("|".join(_CHIPSETS), re.I)
-_BOARD_NOISE = ("Motherboard", "Mainboard", "Corporation", "Inc.", "Co., Ltd.",
-                "(R)", "(TM)")
-
-
-def short_board(name: str) -> str:
-    """Chipset from a board product string, e.g. 'Z690M Snow Dream' -> 'Z690'.
-
-    Falls back to the cleaned-up board name when no known chipset is in it --
-    an unfamiliar board is still more use than a blank corner.
-    """
-    if not name:
-        return ""
-    m = _CHIPSET_RX.search(name)
-    if m:
-        return m.group(0).upper()
-    s = name
-    for t in _BOARD_NOISE:
         s = s.replace(t, " ")
     return re.sub(r"\s+", " ", s).strip(" -")
 
@@ -628,6 +593,25 @@ BOTTOM = (("mem", "MEM", "accent_mem"),
           ("fps", "FPS", None))
 
 TOP_BAR = Geo(8, 4, 304, 16)
+
+# ---------------------------------------------------------------- spectrum --
+# The analyser's fixed geometry. The band spans the plate width and its height is
+# a whole number of dirty-rect rows (10 px each), so a bar that crosses a row
+# costs only that row -- which is what keeps a live spectrum inside the USB
+# budget. The decade ticks land well inside the plate, clear of the outer case's
+# corner screws.
+SPEC_X0, SPEC_X1 = 8, 312
+SPEC_TOP, SPEC_BOT = 33, 153
+SPEC_ROW, SPEC_ROWS = 10, 12
+SPEC_CELL, SPEC_BAR = 10, 8
+SPEC_MID = (SPEC_TOP + SPEC_BOT) // 2
+SPEC_RAIL_Y = 152
+SPEC_TICK_Y = 154
+SPEC_TOP_STRIP = 24          # the top bar band, above the first card row
+SPEC_PITCH = (SPEC_X1 - SPEC_X0) / BANDS
+SPEC_TICKS = ((100.0, "100"), (1000.0, "1k"), (10000.0, "10k"))
+SILENCE = [0.0] * BANDS      # a flat band, shared and never written to
+_SPEC_SEG = {}               # mirrored-gradient segments, keyed by accent + height
 PAD = 12
 
 
@@ -663,6 +647,10 @@ class Dashboard:
         self._board = ""
         self._bg_key = None
         self._bg_img = None
+        # what the analyser hands over each frame; silence until it is wired up
+        self.spectrum_bands = list(SILENCE)
+        self.spectrum_peaks = list(SILENCE)
+        self.spec_state = ""       # capture health, shown as a hint in the bar
         self._plain = False     # True while a user backdrop replaces the chrome
         self._num_style = None  # face the numerals were built for
 
@@ -678,6 +666,7 @@ class Dashboard:
         self._f_clock = F(13, "bold")
         self._f_net = F(11, "semibold")
         self._f_spec = F(11, "semibold")
+        self._f_tick = F(9, "semibold")      # the spectrum's decade ticks
 
         self._layout()
         self.apply_config(self.cfg, force=True)
@@ -696,7 +685,9 @@ class Dashboard:
 
     def _look_sig(self):
         c = self.cfg
-        return (c.style,
+        return (c.mode,
+                c.spectrum_style,
+                c.style,
                 c.accent_cpu, c.accent_gpu, c.accent_mem, c.accent_pwr,
                 round(c.brightness, 3), round(c.bg_brightness, 3),
                 round(c.saturation, 3), round(c.glass, 3),
@@ -748,6 +739,13 @@ class Dashboard:
         keys = [k for k, _, _ in BOTTOM
                 if getattr(self.cfg, "show_" + k, True)]
         self.cards = {}
+        if self.cfg.mode == "spectrum":
+            # no cards at all: the spectrum owns the plate, and an empty map is
+            # what makes the pool, label and card passes fall away on their own
+            self.big_h = 140
+            self.bottom_order = []
+            self._masks = {}
+            return
         self.big_h = 78 if keys else 140
         self.cards["cpu"] = Geo(8, 24, 150, self.big_h)
         self.cards["gpu"] = Geo(162, 24, 150, self.big_h)
@@ -784,6 +782,9 @@ class Dashboard:
         t.fg_app = stats.get("fg_app", "")
         t.host = stats.get("host", "")
         t.board = stats.get("board_name", "")
+        self.spectrum_bands = list(stats.get("spectrum_bands") or SILENCE)
+        self.spectrum_peaks = list(stats.get("spectrum_peaks") or SILENCE)
+        self.spec_state = stats.get("spec_state", "")
 
     # ---------------------------------------------------------------- static
     def _load_bg_image(self, path):
@@ -903,7 +904,9 @@ class Dashboard:
             self._inset = ins
             self._masks = {}
         img = ImageEnhance.Brightness(back).enhance(c.brightness)
-        if c.style == "quartz":
+        if c.mode == "spectrum":
+            self._spectrum_chrome(img, back, c)
+        elif c.style == "quartz":
             self._plate(img, back, TOP_BAR, PLATE_BEZEL)
             for g in self.cards.values():
                 self._case(img, back, g, self._radius)
@@ -917,6 +920,161 @@ class Dashboard:
         # card captions sit above the liquid fill, so they are drawn per frame
         # (see _labels) instead of being baked into the chrome
         self._static = img
+
+    # ------------------------------------------------------------- spectrum --
+    def _spec_tick_x(self, f):
+        """Left edge of the band carrying ``f``, for the decade ticks."""
+        t = (math.log10(f) - math.log10(FMIN)) / (math.log10(FMAX) - math.log10(FMIN))
+        return int(SPEC_X0 + t * BANDS * SPEC_PITCH)
+
+    def _panel_case(self, img):
+        """The instrument's outer case: four rails and their corner screws.
+
+        The quartz face fastens every card down with a case of its own; in
+        spectrum mode there are no cards, so the plate carries the case instead,
+        which is what keeps the machined reading when the cards step aside.
+        """
+        b = CASE_BEZEL
+        d = ImageDraw.Draw(img)
+        d.rectangle((0, 0, W - 1, H - 1), outline=METAL_LO)
+        d.line((0, 0, W - 1, 0), fill=METAL_HI)
+        d.line((0, 1, W - 1, 1), fill=mix(METAL_HI, METAL_LO, 0.45))
+        d.rectangle((b, b, W - 1 - b, H - 1 - b), outline=(15, 17, 21))
+        m = b / 2.0
+        for cx, cy in ((m, m), (W - m, m), (m, H - m), (W - m, H - m)):
+            self._screw(img, cx, cy, 1.9)
+
+    def _spectrum_chrome(self, img, back, c):
+        """Bake everything about the spectrum that does not move.
+
+        The ghost cells, the rails, the decade ticks and the dB grid are the same
+        pixels every frame, so they belong in the static layer: the dirty-rect
+        pass then only ever sees the bars that actually moved, which is what
+        keeps a live spectrum inside the link budget. In the quartz face the bars
+        sit on the dial, the way they sit behind the glass of a real instrument.
+        """
+        if c.style == "quartz" and not self._plain:
+            mask = Image.new("L", (W, H), 0)
+            ImageDraw.Draw(mask).rectangle(
+                (CASE_BEZEL, SPEC_TOP_STRIP, W - 1 - CASE_BEZEL, H - 1 - CASE_BEZEL),
+                fill=255)
+            img.paste(self._dial(back), (0, 0), mask)
+            self._panel_case(img)
+            self._plate(img, back, TOP_BAR, PLATE_BEZEL)
+
+        d = ImageDraw.Draw(img, "RGBA")
+        style = (c.spectrum_style or "led").lower()
+        if style == "led":
+            # the unlit cells are the panel's texture; baked, they are free
+            for i in range(BANDS):
+                x = int(SPEC_X0 + i * SPEC_PITCH + (SPEC_PITCH - SPEC_CELL) / 2)
+                for r in range(SPEC_ROWS):
+                    y = SPEC_BOT - (r + 1) * SPEC_ROW + 1
+                    d.rectangle((x, y, x + SPEC_CELL - 1, y + SPEC_ROW - 2),
+                                fill=(255, 255, 255, 13))
+        elif style == "peak":
+            for frac in (0.2, 0.4, 0.6, 0.8):
+                y = SPEC_BOT - int(frac * (SPEC_BOT - SPEC_TOP))
+                d.line((SPEC_X0, y, SPEC_X1, y), fill=(255, 255, 255, 12))
+        elif style == "mirror":
+            d.line((SPEC_X0, SPEC_MID, SPEC_X1, SPEC_MID),
+                   fill=(255, 255, 255, 22))
+        # the rail and the decade ticks are shared: the instrument's own scale
+        d.line((SPEC_X0, SPEC_RAIL_Y, SPEC_X1, SPEC_RAIL_Y),
+               fill=(255, 255, 255, 26))
+        for f, label in SPEC_TICKS:
+            x = self._spec_tick_x(f)
+            d.line((x, SPEC_RAIL_Y + 1, x, SPEC_RAIL_Y + 4),
+                   fill=(255, 255, 255, 34))
+            d.text((x + 2, SPEC_TICK_Y), label, font=self._f_tick, fill=TEXT_DIM)
+
+    def _spectrum_bars(self, img, d):
+        """The bars: the one part of a spectrum frame that is not baked.
+
+        Every height is quantised to 2 px, and the LED face is already aligned to
+        the 10 px row grid, so a band that does not cross a step this frame costs
+        no bandwidth at all -- which is what keeps the mode inside the link.
+        """
+        style = (self.cfg.spectrum_style or "led").lower()
+        accent = hex_rgb(self.cfg.accent_cpu, ACCENT_CYAN)
+        if style == "peak":
+            self._spec_peak(d, self.spectrum_bands, self.spectrum_peaks, accent)
+        elif style == "mirror":
+            self._spec_mirror(img, self.spectrum_bands, accent)
+        else:
+            self._spec_led(d, self.spectrum_bands, accent)
+
+    def _spec_led(self, d, bands, accent):
+        """One square per row: solid when lit, and the top cell whitened."""
+        hot = mix(accent, (255, 255, 255), 0.42)
+        for i, level in enumerate(bands):
+            x = int(SPEC_X0 + i * SPEC_PITCH + (SPEC_PITCH - SPEC_CELL) / 2)
+            lit = max(0, min(SPEC_ROWS, int(round(level * SPEC_ROWS))))
+            for r in range(lit):
+                y = SPEC_BOT - (r + 1) * SPEC_ROW + 1
+                d.rectangle((x, y, x + SPEC_CELL - 1, y + SPEC_ROW - 2),
+                            fill=(hot if r == lit - 1 else accent) + (255,))
+
+    def _spec_peak(self, d, bands, peaks, accent):
+        """Flat bars with a cap on the recent maximum; amber near full scale."""
+        bar = mix(accent, (12, 16, 24), 0.34)
+        span = SPEC_BOT - SPEC_TOP
+        for i, level in enumerate(bands):
+            x = int(SPEC_X0 + i * SPEC_PITCH + (SPEC_PITCH - SPEC_BAR) / 2)
+            h = (int(level * span) // 2) * 2
+            if h:
+                d.rectangle((x, SPEC_BOT - h, x + SPEC_BAR - 1, SPEC_BOT),
+                            fill=bar + (255,))
+            ph = (int(peaks[i] * span) // 2) * 2
+            if ph > h + 2:
+                cap = ACCENT_AMBER if peaks[i] > 0.88 else accent
+                d.rectangle((x, SPEC_BOT - ph, x + SPEC_BAR - 1, SPEC_BOT - ph + 2),
+                            fill=cap + (255,))
+
+    def _spec_strip(self, accent):
+        """The mirrored ramp, baked once per accent and resampled per height."""
+        key = ("strip", accent)
+        strip = _SPEC_SEG.get(key)
+        if strip is None:
+            span = SPEC_MID - SPEC_TOP
+            outer = mix(accent, (255, 255, 255), 0.10)
+            inner = mix(accent, (12, 16, 24), 0.78)
+            strip = Image.new("RGB", (SPEC_BAR, span))
+            px = strip.load()
+            for y in range(span):
+                col = mix(outer, inner, y / (span - 1.0))
+                for x in range(SPEC_BAR):
+                    px[x, y] = col
+            _SPEC_SEG[key] = strip
+        return strip
+
+    def _spec_seg(self, accent, h):
+        """A rounded-capped bar of height ``h``, cached per accent and height."""
+        key = ("seg", accent, h)
+        seg = _SPEC_SEG.get(key)
+        if seg is None:
+            out = self._spec_strip(accent).resize((SPEC_BAR, h))
+            # the mask is made taller than the crop, so the inner end stays flat
+            # where it meets its own reflection
+            mask = Image.new("L", (SPEC_BAR, h + 6), 0)
+            ImageDraw.Draw(mask).rounded_rectangle((0, 0, SPEC_BAR - 1, h + 5),
+                                                   radius=3, fill=255)
+            seg = (out, mask.crop((0, 0, SPEC_BAR, h)))
+            _SPEC_SEG[key] = seg
+        return seg
+
+    def _spec_mirror(self, img, bands, accent):
+        """Mirrored about the centre hairline, bright at the outer ends."""
+        span = SPEC_MID - SPEC_TOP
+        for i, level in enumerate(bands):
+            h = (int(level * span) // 2) * 2
+            if h < 2:                    # silence draws nothing, not a stub
+                continue
+            seg, mask = self._spec_seg(accent, min(span, h))
+            x = int(SPEC_X0 + i * SPEC_PITCH + (SPEC_PITCH - SPEC_BAR) / 2)
+            img.paste(seg, (x, SPEC_MID - h), mask)
+            img.paste(seg.transpose(Image.FLIP_TOP_BOTTOM), (x, SPEC_MID),
+                      mask.transpose(Image.FLIP_TOP_BOTTOM))
 
     def _labels(self, d):
         """Card captions, redrawn each frame so the pool never tints them."""
@@ -1223,7 +1381,7 @@ class Dashboard:
         self.num_pwr.set(f"{v.power:.0f}")
         self._cpu_short = short_cpu(v.cpu_name)
         self._gpu_short = short_gpu(v.gpu_name)
-        self._board = short_board(v.board)
+        self._board = v.board
         self._cores = core_label(v.cpu_cores, v.cpu_threads)
 
     # ---------------------------------------------------------------- render
@@ -1240,6 +1398,10 @@ class Dashboard:
 
         d = ImageDraw.Draw(img, "RGBA")
 
+        if c.mode == "spectrum":
+            # the bars are the only thing in this mode that is not baked
+            self._spectrum_bars(img, d)
+
         # the pools fill next; every readout is then drawn on top of them
         for key, pct, theme in (("cpu", self.bar["cpu"], cpu_col),
                                 ("gpu", self.bar["gpu"], gpu_col),
@@ -1249,7 +1411,7 @@ class Dashboard:
                 self._water(img, key, g, pct, theme)
 
         for key, pct in (("cpu", self.v.cpu), ("gpu", self.v.gpu)):
-            if pct > 80:
+            if pct > 80 and key in self.cards:
                 pulse = 0.5 + 0.5 * math.sin(self.time * 3.0)
                 col = ACCENT_RED if pct > 92 else ACCENT_AMBER
                 a = int((pct - 80) / 20 * 55 * (0.6 + 0.4 * pulse))
@@ -1260,13 +1422,18 @@ class Dashboard:
                     outline=col + (min(a, 60),), width=2)
 
         self._labels(d)
-        self._big_card(d, img, self.cards["cpu"], self.num_cpu, self.num_fc,
-                       "GHz", f"~{self.v.cpu_power:.0f} W", TEXT_DIM, self._cpu_short)
-        self._chip(d, self.cards["cpu"], "CPU", self._cores, TEXT_DIM)
-        self._big_card(d, img, self.cards["gpu"], self.num_gpu, self.num_fg,
-                       "MHz", f"~{self.v.gpu_power:.0f} W", TEXT_DIM, self._gpu_short)
-        self._chip(d, self.cards["gpu"], "GPU",
-                   f"{self.v.temp_gpu:.0f}°C", ramp(TEMPERATURE_STOPS, self.v.temp_gpu))
+        cpu_g, gpu_g = self.cards.get("cpu"), self.cards.get("gpu")
+        if cpu_g is not None:
+            self._big_card(d, img, cpu_g, self.num_cpu, self.num_fc, "GHz",
+                           f"~{self.v.cpu_power:.0f} W" if c.show_watt else "",
+                           TEXT_DIM, self._cpu_short)
+            self._chip(d, cpu_g, "CPU", self._cores, TEXT_DIM)
+        if gpu_g is not None:
+            self._big_card(d, img, gpu_g, self.num_gpu, self.num_fg, "MHz",
+                           f"~{self.v.gpu_power:.0f} W" if c.show_watt else "",
+                           TEXT_DIM, self._gpu_short)
+            self._chip(d, gpu_g, "GPU",
+                       f"{self.v.temp_gpu:.0f}°C", ramp(TEMPERATURE_STOPS, self.v.temp_gpu))
 
         if "mem" in self.cards:
             g = self.cards["mem"]
@@ -1294,16 +1461,6 @@ class Dashboard:
         # so the band the text must stay inside is inset by the plate's bezel
         bo = PLATE_BEZEL if c.style == "quartz" else 0
         wtop, wbot = TOP_BAR.y + bo, TOP_BAR.y + TOP_BAR.h - bo
-        # left corner carries the chipset -- the one part of the board name that
-        # means anything at a glance -- falling back to the machine name, unless
-        # the panel asked for the machine name outright
-        if (c.top_left or "board").lower() == "host":
-            left_txt = self.v.host or "PC"
-        else:
-            left_txt = self._board or self.v.host or "PC"
-        d.text((TOP_BAR.x + 2, ink_mid(self._f_host, left_txt, wtop, wbot)),
-               left_txt, font=self._f_host, fill=TEXT)
-
         # %I and %H are the same width, so dropping to 12-hour cannot squeeze the
         # rate readout in the middle (that one is ellipsised once it runs out of
         # room, so the clock must never grow)
@@ -1314,6 +1471,19 @@ class Dashboard:
                 ink_mid(self._f_clock, self.clock, wtop, wbot)),
                self.clock, font=self._f_clock, fill=TEXT)
 
+        # left corner carries the board model as the firmware reports it, e.g.
+        # 'Z690M Snow Dream' -- the whole string, not just the chipset. Long ones
+        # are ellipsised so the rate readout keeps a floor of room in the middle
+        # instead of being squeezed away by the name.
+        if (c.top_left or "board").lower() == "host":
+            left_txt = self.v.host or "PC"
+        else:
+            left_txt = self._board or self.v.host or "PC"
+        room = TOP_BAR.w - 24 - cw - (64 if c.show_net else 0)
+        left_txt = fit(left_txt, self._f_host, room)
+        d.text((TOP_BAR.x + 2, ink_mid(self._f_host, left_txt, wtop, wbot)),
+               left_txt, font=self._f_host, fill=TEXT)
+
         if c.show_net:
             hw = self._f_host.getlength(left_txt)
             left = TOP_BAR.x + 6 + hw
@@ -1323,9 +1493,16 @@ class Dashboard:
             d.text(((left + right - self._f_net.getlength(net)) / 2.0,
                     ink_mid(self._f_net, net, wtop, wbot)),
                    net, font=self._f_net, fill=TEXT_DIM)
+        # the power lamp: green while all is well, amber when the spectrum is up
+        # but the capture is not. The top bar is already full -- plate name, rate
+        # readout, clock -- and the lamp is the only free indicator there, so the
+        # fault rides on it instead of a second dot crowding the corner.
+        spec_down = (c.mode == "spectrum"
+                     and self.spec_state not in ("", "ok", "idle"))
         cx, cy = TOP_BAR.x + TOP_BAR.w - 8, TOP_BAR.y + 8
         a = int(120 + 135 * (0.5 + 0.5 * math.sin(self.time * 2.4)))
-        d.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), fill=ACCENT_GREEN + (a,))
+        d.ellipse((cx - 3, cy - 3, cx + 3, cy + 3),
+                  fill=(ACCENT_AMBER if spec_down else ACCENT_GREEN) + (a,))
 
         return img
 
@@ -1346,9 +1523,12 @@ class Dashboard:
         num_pct.draw(img, g.x + PAD, g.y + 18)
         d.text((g.x + PAD + num_pct.width() + 3, g.y + 34), "%", font=self._f_sub,
                fill=TEXT_DIM, stroke_width=1, stroke_fill=TEXT_SHADOW)
-        d.text((g.x + g.w - PAD - self._f_sub.getlength(rhs), g.y + 34), rhs,
-               font=self._f_sub, fill=rhs_col,
-               stroke_width=1, stroke_fill=TEXT_SHADOW)
+        # the right-hand readout is optional: an empty string means the panel
+        # asked for the card without it, so nothing is drawn at all
+        if rhs:
+            d.text((g.x + g.w - PAD - self._f_sub.getlength(rhs), g.y + 34), rhs,
+                   font=self._f_sub, fill=rhs_col,
+                   stroke_width=1, stroke_fill=TEXT_SHADOW)
         # part name, tucked in directly under the readout and above the pool
         d.text((g.x + PAD, g.y + 50),
                fit(spec or "—", self._f_spec, g.w - PAD * 2),

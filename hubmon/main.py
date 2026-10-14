@@ -20,7 +20,7 @@ import time
 import numpy as np
 import psutil
 
-from . import config, transport, webui
+from . import audio, config, transport, webui
 from .render import Dashboard, H, W, core_label
 from .sensors import Sensors
 
@@ -77,7 +77,13 @@ class Demo:
         t = self.t
         cpu = 38 + 26 * math.sin(t * 0.7) + 8 * math.sin(t * 3.1)
         gpu = 55 + 28 * math.sin(t * 0.5 + 1) + 10 * math.sin(t * 2.3)
+        # a plausible moving spectrum, so the mode can be previewed without a
+        # capture device: a travelling ripple under a bass-heavy tilt
+        spec = [max(0.0, min(1.0, (0.35 + 0.6 * abs(math.sin(t * 0.8 + i * 0.30)))
+                    * (1.0 - i / 30.0))) for i in range(audio.BANDS)]
         return dict(
+            spectrum_bands=spec,
+            spectrum_peaks=[min(1.0, v + 0.12) for v in spec],
             cpu_util=cpu, gpu_util=gpu, mem_percent=48 + 3 * math.sin(t * 0.3),
             cpu_freq_mhz=2500 + 17 * cpu, gpu_freq_mhz=1500 + 20 * gpu,
             total_power_w=70 + 0.6 * cpu + 0.9 * gpu, cpu_power_w=12 + 0.55 * cpu,
@@ -128,6 +134,7 @@ def run_stream(cfg, demo=False, log_every=5.0):
 
     if not demo:
         sensor.start()
+    spec = audio.Spectrum(cfg.spectrum_device)
     screen = transport.LiveScreen()
 
     try:
@@ -176,8 +183,23 @@ def run_stream(cfg, demo=False, log_every=5.0):
             dt = max(0.001, min(0.5, now - last))
             last = now
             dash.apply_config(cfg)         # pick up live panel edits
+            if cfg.spectrum_device != spec.device:
+                spec.stop()               # the panel changed the capture device
+                spec = audio.Spectrum(cfg.spectrum_device)
+            want_spec = (cfg.mode == "spectrum")
+            if want_spec and not demo:
+                spec.start()
+            elif not want_spec:
+                spec.stop()
+            state["spec_state"] = spec.state
             try:
-                dash.update(sensor.snapshot())
+                stats = sensor.snapshot()
+                if want_spec and not demo:
+                    bands, peaks = spec.levels(dt)
+                    stats["spectrum_bands"] = bands
+                    stats["spectrum_peaks"] = peaks
+                stats["spec_state"] = spec.state
+                dash.update(stats)
                 img = dash.render(dt)
                 cur = dash.to_rgb565_be(img)
 
@@ -248,6 +270,7 @@ def run_stream(cfg, demo=False, log_every=5.0):
     finally:
         if not demo:
             sensor.stop()
+        spec.stop()
         screen.close()
         webui.stop(panel)
         print(f"[hubmon] stopped after {sent} frames, "

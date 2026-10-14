@@ -37,6 +37,10 @@ def main():
         "--workpath", SPEC_DIR,
         "--hidden-import", "usb.backend.libusb1",
         "--collect-all", "libusb_package",
+        # soundcard reaches the WASAPI loopback through cffi, so its data files
+        # and the cffi backend have to travel with the bundle
+        "--collect-all", "soundcard",
+        "--hidden-import", "cffi",
     ]
 
     # resolve exactly like the app does, so a configured path is bundled too
