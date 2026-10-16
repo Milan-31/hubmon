@@ -658,11 +658,18 @@ LYRIC_H = 24
 LYRIC_PAD = 3
 # the entrance rise, in px, a still-hidden glyph starts below its seat
 LYRIC_RISE = 3
-# The band is where a *settled* glyph sits; the reveal (rise + seat sway) and the
-# geom scatter reach a little past it, so the overlay is allowed a taller window
-# than the band -- measured, not guessed: see build/_pool/lyric_envelope.py. The
-# window's top sits 1 px above SPEC_TOP because a 21 px CJK face inks 22 px tall,
-# which in a 24 px band leaves too little room for the sway above the ink.
+# The geom effect's shards keep this share of their opacity while they are still
+# scattered, so the flight reads: tying alpha to the reveal alone would make the
+# fragments most transparent exactly when they are furthest from their seat, and
+# the scatter would vanish (measured: it moved 3 px more than the plain fade).
+LYRIC_GEOM_FLOOR = 0.6
+# The band is where a *settled* glyph sits; the reveal (rise + seat sway) reaches
+# a little past it, so the overlay is allowed a taller window than the band --
+# measured, not guessed (see build/_pool/lyric_envelope.py). The window's top
+# sits 1 px above SPEC_TOP because a 21 px CJK face inks 22 px tall, which in a
+# 24 px band leaves too little room for the sway above the ink. It governs
+# everything that *rests*: the settled line and the fade reveal. The geom
+# shatter is exempt by design -- its shards cross the whole panel before landing.
 LYRIC_WIN_TOP = SPEC_TOP - 1
 LYRIC_WIN_BOT = SPEC_TOP + 34
 
@@ -711,18 +718,20 @@ def _alpha_lut(a):
     return [v * a // 255 for v in range(256)]
 
 
-def _jitter(txt, ci, bi):
-    """The scattered seat one strip starts from, in px.
+def _shatter(txt, ci, bi, x, y):
+    """Where shard ``bi`` of glyph ``ci`` starts, as an offset from its seat.
 
-    Deterministic on purpose: the seed is a crc32, never the builtin hash, which
-    is salted per process -- the blocks would then land somewhere different on
-    every launch and would not line up between two runs of the same line.
+    The start is a hash-picked point anywhere on the panel, so a line's shards
+    fly in from across the whole screen instead of nudging a few pixels in place
+    -- expressed as an offset from the shard's resting place ``(x, y)``, which
+    keeps every fragment beginning on screen rather than half of them clipped
+    away off the edge. Deterministic on purpose: the seed is a crc32, never the
+    builtin hash, which is salted per process -- the shards would then land
+    somewhere different on every launch and would not line up between two runs
+    of the same line.
     """
     s = zlib.crc32(f"{txt}|{ci}|{bi}".encode())
-    # The vertical swing is the smaller of the two: a glyph's layer is its own ink
-    # box plus padding, so the scatter is the only thing that can push ink past
-    # the overlay window, and +/-2 keeps the whole reveal inside it (measured).
-    return (s % 21) - 10, ((s >> 8) % 5) - 2
+    return (s % W) - x, ((s >> 9) % H) - y
 
 
 def _paste_overlay(img, lay, px, py):
@@ -1321,9 +1330,11 @@ class Dashboard:
         t = max(0.0, min(1.0, float(self.lyric_t)))
         dur = max(1e-6, float(self.lyric_dur))
         eff = self.lyric_effect or "fade"
-        # the outgoing line hands its opacity over, whole and in place (its own
-        # static seat), while the incoming one types itself in glyph by glyph
-        if self.lyric_prev and t < 1.0:
+        # A cross-fade hands the outgoing line's opacity to the incoming one in
+        # place; geom has no outgoing line at all, because its fragments fly in
+        # from all over the panel and a whole sentence sitting behind them would
+        # only muddy the shatter.
+        if self.lyric_prev and t < 1.0 and eff != "geom":
             self._lyric_line(img, fit(self.lyric_prev, f, span), None,
                              int(base * (1.0 - t)), 0.0)
         self._lyric_line(img, txt, eff, base, t, dur)
@@ -1398,7 +1409,8 @@ class Dashboard:
         ``eff`` None marks the outgoing line: it is already settled, so every
         glyph takes ``u = 1``. Otherwise ``u`` is the glyph's reveal progress and
         carries its opacity (``base * u``) and its 3 px rise. ``geom`` also cuts
-        each still-moving glyph into three vertical blocks that fly together.
+        each still-moving glyph into three vertical shards that fly home from
+        points scattered across the whole panel.
         """
         if not txt or base <= 0:
             return
@@ -1406,26 +1418,36 @@ class Dashboard:
         settled = eff is None
         for k, (lay, dx, dy) in enumerate(cells):
             u = 1.0 if settled else word_u(t, dur, k)
-            a = int(base * u)
-            if a <= 0:
-                continue
             px = int(line_x + dx)
             py = int(line_y + dy + _seat(txt, k) + int(round((1.0 - u) * LYRIC_RISE)))
             if eff == "geom" and u < 1.0:
+                # The glyph breaks into three vertical shards; each starts from its
+                # own hash-picked point on the panel and eases onto its seat. The
+                # alpha floor keeps the fragments legible while they are furthest
+                # out, and the paste is deliberately *not* clipped to the overlay
+                # window -- the flight is a full-panel move, so it is allowed to
+                # cross the bars and the top bar on its way home.
+                a = int(base * (LYRIC_GEOM_FLOOR
+                                + (1.0 - LYRIC_GEOM_FLOOR) * u))
+                if a <= 0:
+                    continue
                 ease = (1.0 - u) ** 2
                 w = lay.width
                 for bi in range(3):
                     s0 = int(round(w * bi / 3.0))
                     s1 = max(s0 + 1, int(round(w * (bi + 1) / 3.0)))
-                    jx, jy = _jitter(txt, k, bi)
                     strip = lay.crop((s0, 0, s1, lay.height))
                     strip.putalpha(strip.getchannel("A").point(_alpha_lut(a)))
-                    _paste_overlay(img, strip, px + s0 + int(round(jx * ease)),
-                                   py + int(round(jy * ease)))
-            else:
-                one = lay.copy()
-                one.putalpha(one.getchannel("A").point(_alpha_lut(a)))
-                _paste_overlay(img, one, px, py)
+                    jx, jy = _shatter(txt, k, bi, px + s0, py)
+                    img.paste(strip, (px + s0 + int(round(jx * ease)),
+                                      py + int(round(jy * ease))), strip)
+                continue
+            a = int(base * u)
+            if a <= 0:
+                continue
+            one = lay.copy()
+            one.putalpha(one.getchannel("A").point(_alpha_lut(a)))
+            _paste_overlay(img, one, px, py)
 
     def _labels(self, d):
         """Card captions, redrawn each frame so the pool never tints them."""
