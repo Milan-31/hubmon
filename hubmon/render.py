@@ -35,7 +35,7 @@ from PIL import (Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter,
 from .audio import BANDS, FMAX, FMIN
 # The per-glyph reveal timing lives with the overlay's state machine; lyrics has
 # no dependency on the renderer, so this import introduces no cycle.
-from .lyrics import LYRIC_CHAR, word_u
+from .lyrics import LYRIC_CHAR, LYRIC_GEOM_SLOW, word_u
 
 W, H = 320, 170
 
@@ -1417,7 +1417,8 @@ class Dashboard:
         line_x, line_y, cells = self._lyric_cells(txt)
         settled = eff is None
         for k, (lay, dx, dy) in enumerate(cells):
-            u = 1.0 if settled else word_u(t, dur, k)
+            u = (1.0 if settled else
+                 word_u(t, dur, k, LYRIC_GEOM_SLOW if eff == "geom" else 1.0))
             px = int(line_x + dx)
             py = int(line_y + dy + _seat(txt, k) + int(round((1.0 - u) * LYRIC_RISE)))
             if eff == "geom" and u < 1.0:
@@ -1427,11 +1428,17 @@ class Dashboard:
                 # out, and the paste is deliberately *not* clipped to the overlay
                 # window -- the flight is a full-panel move, so it is allowed to
                 # cross the bars and the top bar on its way home.
-                a = int(base * (LYRIC_GEOM_FLOOR
-                                + (1.0 - LYRIC_GEOM_FLOOR) * u))
+                #
+                # The path runs on a smoothstep rather than the reveal's own decay:
+                # it leaves the gate unhurried, hangs a beat in mid-panel and then
+                # glides into place, which is what makes the flight read as a slow
+                # non-linear drift instead of a snap. The opacity rides the same
+                # curve, so the shard blooms exactly as it slows down.
+                p = u * u * (3.0 - 2.0 * u)
+                a = int(base * (LYRIC_GEOM_FLOOR + (1.0 - LYRIC_GEOM_FLOOR) * p))
                 if a <= 0:
                     continue
-                ease = (1.0 - u) ** 2
+                ease = 1.0 - p
                 w = lay.width
                 for bi in range(3):
                     s0 = int(round(w * bi / 3.0))

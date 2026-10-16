@@ -346,17 +346,29 @@ class MediaWatcher:
 # LYRIC_STAGGER later than the previous, so the sentence types itself in.
 LYRIC_STAGGER = 0.045
 LYRIC_CHAR = 0.22
+# The geom flight gets a longer beat than the plain reveal: its shards cross the
+# whole panel, and on the reveal's own pace they land before the eye has followed
+# them. Only the *length* is stretched here -- the shape of the motion is the
+# renderer's easing, which drifts the fragments out slowly and settles them home.
+LYRIC_GEOM_SLOW = 1.5
 
 
-def word_u(t, dur, k):
+def word_u(t, dur, k, slow=1.0):
     """Reveal progress (0..1) of glyph ``k`` at frame progress ``t`` of ``dur``.
 
     ``t`` is the 0..1 transition progress, ``dur`` the line's total transition
     length in seconds and ``k`` the glyph's index in the line. Glyph ``k``
     starts LYRIC_STAGGER*k seconds in and takes LYRIC_CHAR to finish, so the
     line reveals left to right.
+
+    ``slow`` stretches both of those paces together, and has to be paired with a
+    ``dur`` stretched by the same factor -- note that ``t * dur`` is the elapsed
+    time either way, so stretching ``dur`` alone would only append dead time
+    after the reveal had already finished rather than pace it out.
     """
-    u = (t * dur - k * LYRIC_STAGGER) / LYRIC_CHAR
+    if t >= 1.0:
+        return 1.0          # settled exactly; the division lands 1 ULP short
+    u = (t * dur - k * LYRIC_STAGGER * slow) / (LYRIC_CHAR * slow)
     return max(0.0, min(1.0, u))
 
 
@@ -408,18 +420,22 @@ class LyricState:
 
         idx = line_at(lines, now)
         text = lines[idx][1] if idx >= 0 else ""
-        # The line's transition length is its glyph count: the last glyph starts
-        # LYRIC_STAGGER*(n-1) in and takes LYRIC_CHAR, so dur covers the whole
-        # left-to-right reveal. Same line -> same dur on every frame.
-        dur = LYRIC_CHAR + LYRIC_STAGGER * max(0, len(text) - 1)
-        if idx != self._idx:                           # a new line came up
+        changed = idx != self._idx                   # a new line came up
+        if changed:
             self._prev = lines[self._idx][1] if 0 <= self._idx < len(lines) else ""
             self._idx = idx
             self._t = 0.0
             if raw == "rotate":
                 self._rotate += 1
                 eff = self._pick(raw)
-        else:
+        # The line's transition length is its glyph count: the last glyph starts
+        # LYRIC_STAGGER*(n-1) in and takes LYRIC_CHAR, so dur covers the whole
+        # left-to-right reveal -- stretched for geom, whose flight is longer.
+        # The effect only settles on a new line, so a line keeps one dur.
+        dur = LYRIC_CHAR + LYRIC_STAGGER * max(0, len(text) - 1)
+        if eff == "geom":
+            dur *= LYRIC_GEOM_SLOW
+        if not changed:
             self._t = min(1.0, self._t + dt / dur)
 
         prev = self._prev if self._t < 1.0 else ""
