@@ -103,6 +103,7 @@ class Demo:
             host="MILAN", board_name="Z690M Snow Dream",
             lyric_text=lines[j], lyric_prev=lines[j - 1],
             lyric_t=min(1.0, (t - slot * 3.0) / 0.4),
+            lyric_dur=lyrics.LYRIC_CHAR + lyrics.LYRIC_STAGGER * (len(lines[j]) - 1),
             lyric_effect="geom" if slot % 2 else "fade", lyric_visible=True)
 
 
@@ -144,6 +145,7 @@ def stats_provider(dash, state):
         d["lyric_text"] = dash.lyric_text
         d["lyric_visible"] = dash.lyric_visible
         d["lyric_effect"] = dash.lyric_effect
+        d["lyric_dur"] = dash.lyric_dur
         return d
     return provider
 
@@ -254,6 +256,7 @@ def run_stream(cfg, demo=False, log_every=5.0):
                     stats["lyric_t"] = lst["t"]
                     stats["lyric_effect"] = lst["effect"]
                     stats["lyric_visible"] = lst["visible"]
+                    stats["lyric_dur"] = lst["dur"]
                 dash.update(stats)
                 img = dash.render(dt)
                 cur = dash.to_rgb565_be(img)

@@ -341,10 +341,23 @@ class MediaWatcher:
 
 
 # --------------------------------------------------------------- overlay state
-# Transition lengths, in seconds: a new line fades in over LYRIC_FADE, while the
-# geometric sweep takes a touch longer so its growth reads as deliberate.
-LYRIC_FADE = 0.35
-LYRIC_GEOM = 0.5
+# Per-character reveal: the line's transition length now scales with how many
+# glyphs it has -- each glyph fades in over LYRIC_CHAR, and each one starts
+# LYRIC_STAGGER later than the previous, so the sentence types itself in.
+LYRIC_STAGGER = 0.045
+LYRIC_CHAR = 0.22
+
+
+def word_u(t, dur, k):
+    """Reveal progress (0..1) of glyph ``k`` at frame progress ``t`` of ``dur``.
+
+    ``t`` is the 0..1 transition progress, ``dur`` the line's total transition
+    length in seconds and ``k`` the glyph's index in the line. Glyph ``k``
+    starts LYRIC_STAGGER*k seconds in and takes LYRIC_CHAR to finish, so the
+    line reveals left to right.
+    """
+    u = (t * dur - k * LYRIC_STAGGER) / LYRIC_CHAR
+    return max(0.0, min(1.0, u))
 
 
 class LyricState:
@@ -385,7 +398,7 @@ class LyricState:
 
         if not lines or snap.get("status") != "playing":
             return {"visible": False, "text": "", "prev": "", "t": 1.0,
-                    "effect": eff, "position_s": 0.0}
+                    "effect": eff, "position_s": 0.0, "dur": LYRIC_CHAR}
 
         if snap.get("duration_s", 0.0) > 0:
             now = float(snap.get("position_s", 0.0))   # SMTC keeps the timeline
@@ -394,6 +407,11 @@ class LyricState:
             now = self._clock
 
         idx = line_at(lines, now)
+        text = lines[idx][1] if idx >= 0 else ""
+        # The line's transition length is its glyph count: the last glyph starts
+        # LYRIC_STAGGER*(n-1) in and takes LYRIC_CHAR, so dur covers the whole
+        # left-to-right reveal. Same line -> same dur on every frame.
+        dur = LYRIC_CHAR + LYRIC_STAGGER * max(0, len(text) - 1)
         if idx != self._idx:                           # a new line came up
             self._prev = lines[self._idx][1] if 0 <= self._idx < len(lines) else ""
             self._idx = idx
@@ -402,10 +420,8 @@ class LyricState:
                 self._rotate += 1
                 eff = self._pick(raw)
         else:
-            dur = LYRIC_GEOM if eff == "geom" else LYRIC_FADE
             self._t = min(1.0, self._t + dt / dur)
 
-        text = lines[idx][1] if idx >= 0 else ""
         prev = self._prev if self._t < 1.0 else ""
         return {"visible": bool(text), "text": text, "prev": prev,
-                "t": self._t, "effect": eff, "position_s": now}
+                "t": self._t, "effect": eff, "position_s": now, "dur": dur}

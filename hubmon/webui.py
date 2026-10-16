@@ -241,6 +241,10 @@ SCHEMA = [
                               ["rotate", "轮换"]]},
                  {"key": "lyrics_opacity", "label": "歌词不透明度", "type": "num",
                   "min": 0.3, "max": 1.0, "step": 0.05, "unit": ""},
+                 {"key": "lyrics_font", "label": "歌词字体", "type": "list",
+                  "options": [["youyuan", "幼圆"], ["xihei", "细黑"]]},
+                 {"key": "lyrics_color", "label": "歌词颜色", "type": "color"},
+                 {"key": "lyrics_glow", "label": "歌词光晕", "type": "bool"},
              ]},
             {"caption": "显示调节", "rows": [
                 {"key": "brightness", "label": "整体亮度", "type": "num",

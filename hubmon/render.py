@@ -33,6 +33,9 @@ from PIL import (Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter,
                  ImageFont, ImageOps)
 
 from .audio import BANDS, FMAX, FMIN
+# The per-glyph reveal timing lives with the overlay's state machine; lyrics has
+# no dependency on the renderer, so this import introduces no cycle.
+from .lyrics import LYRIC_CHAR, word_u
 
 W, H = 320, 170
 
@@ -119,6 +122,25 @@ def _cjk(size):
         except Exception:
             continue
     return F(size, "bold")
+
+
+# The lyric overlay's own faces, each a fallback chain: a decorative name that
+# is missing on this machine still lands on a CJK font rather than boxes.
+_LYRIC_FACES = {
+    "youyuan": ("simyou.ttf", "msyhbd.ttc", "msyh.ttc"),
+    "xihei": ("STXIHEI.TTF", "msyhbd.ttc", "msyh.ttc"),
+}
+LYRIC_SIZE = 21
+
+
+def _face_for(name):
+    """The lyric font for a config name, walking that face's fallback chain."""
+    for n in _LYRIC_FACES.get(name) or ():
+        try:
+            return ImageFont.truetype(f"{FONT_DIR}/{n}", LYRIC_SIZE)
+        except Exception:
+            continue
+    return _cjk(LYRIC_SIZE)
 
 
 def hex_rgb(s, fallback):
@@ -628,11 +650,21 @@ SPEC_TICKS = ((100.0, "100"), (1000.0, "1k"), (10000.0, "10k"))
 SILENCE = [0.0] * BANDS      # a flat band, shared and never written to
 PAD = 12
 
-# The lyric overlay: one line hovering over the top of the bars, plus the margin
-# its rasterised layer carries so the 1 px halo is never clipped at the edge.
-LYRIC_TOP = SPEC_TOP + 4
-LYRIC_H = 16
-LYRIC_PAD = 2
+# The lyric overlay: one line hovering over the top of the bars. Each glyph is
+# rasterised onto its own small layer (glyph + 1 px rim + optional glow), so the
+# band is a little taller than the type and the padding is the glow's blur margin.
+LYRIC_TOP = SPEC_TOP + 3
+LYRIC_H = 24
+LYRIC_PAD = 3
+# the entrance rise, in px, a still-hidden glyph starts below its seat
+LYRIC_RISE = 3
+# The band is where a *settled* glyph sits; the reveal (rise + seat sway) and the
+# geom scatter reach a little past it, so the overlay is allowed a taller window
+# than the band -- measured, not guessed: see build/_pool/lyric_envelope.py. The
+# window's top sits 1 px above SPEC_TOP because a 21 px CJK face inks 22 px tall,
+# which in a 24 px band leaves too little room for the sway above the ink.
+LYRIC_WIN_TOP = SPEC_TOP - 1
+LYRIC_WIN_BOT = SPEC_TOP + 34
 
 # The spectrum's styles, as (baked chrome, live bars). Chrome runs once per bake
 # and draws whatever is identical every frame; bars runs every frame. Adding a
@@ -687,9 +719,40 @@ def _jitter(txt, ci, bi):
     every launch and would not line up between two runs of the same line.
     """
     s = zlib.crc32(f"{txt}|{ci}|{bi}".encode())
-    # the vertical swing is the smaller of the two: twice it would push the halo
-    # a row past the band the overlay is allowed to occupy
-    return (s % 21) - 10, ((s >> 8) % 9) - 4
+    # The vertical swing is the smaller of the two: a glyph's layer is its own ink
+    # box plus padding, so the scatter is the only thing that can push ink past
+    # the overlay window, and +/-2 keeps the whole reveal inside it (measured).
+    return (s % 21) - 10, ((s >> 8) % 5) - 2
+
+
+def _paste_overlay(img, lay, px, py):
+    """Paste a finished lyric layer, clipped to the overlay's vertical window.
+
+    The window is the settled band plus the room the reveal and the scatter need;
+    a layer that would reach past it (an unusually tall glyph, a wide glow) is
+    trimmed to it, so the overlay can never touch the chrome above or wash deep
+    into the bars. Horizontal overhang is left to PIL's own edge clipping.
+    """
+    y0, y1 = 0, lay.height
+    if py < LYRIC_WIN_TOP:
+        y0, py = LYRIC_WIN_TOP - py, LYRIC_WIN_TOP
+    if py + y1 > LYRIC_WIN_BOT + 1:
+        y1 = LYRIC_WIN_BOT + 1 - py
+    if y1 <= y0:
+        return
+    if y0 or y1 != lay.height:
+        lay = lay.crop((0, y0, lay.width, y1))
+    img.paste(lay, (px, py), lay)
+
+
+def _seat(txt, k):
+    """The fixed vertical offset (px) glyph ``k`` of ``txt`` sits at.
+
+    Hash-derived on purpose so a line reads as deliberately uneven rather than
+    machine-straight, while staying identical on every frame and every launch --
+    a random draw per frame would make the whole sentence shimmer.
+    """
+    return (zlib.crc32(f"{txt}|{k}".encode()) % 7) - 3
 
 
 class Dashboard:
@@ -730,6 +793,8 @@ class Dashboard:
         self.spec_state = ""       # capture health, shown as a hint in the bar
         self._plain = False     # True while a user backdrop replaces the chrome
         self._num_style = None  # face the numerals were built for
+        self._face = None       # cached lyric face, rebuilt when the name changes
+        self._face_key = None
 
         # RGB565 softens thin strokes, so nothing is drawn in a regular weight
         self._f_lbl = F(11, "bold")
@@ -744,7 +809,9 @@ class Dashboard:
         self._f_net = F(11, "semibold")
         self._f_spec = F(11, "semibold")
         self._f_tick = F(9, "semibold")      # the spectrum's decade ticks
-        self._f_lyric = _cjk(15)             # the overlay line needs a CJK face
+        # the overlay line is a CJK face, and it retracks when the panel switches
+        # the lyric font: per-glyph layers, so nothing is rasterised line-wide
+        self._f_lyric = self._lyric_face()
 
         # lyric overlay: drawing-time fields, deliberately outside _look_sig, so
         # a new line never re-bakes the chrome
@@ -753,10 +820,19 @@ class Dashboard:
         self.lyric_t = 1.0
         self.lyric_effect = "fade"
         self.lyric_visible = False
-        self._lyr_cache = {}                 # text -> (rasterised layer, offset)
+        self.lyric_dur = 0.22                # the line's reveal length, seconds
+        self._lyr_cache = {}                 # (txt, face, colour, glow) -> cells
 
         self._layout()
         self.apply_config(self.cfg, force=True)
+
+    def _lyric_face(self):
+        """The lyric face for the current setting, rebuilt only when it changes."""
+        key = getattr(self.cfg, "lyrics_font", "youyuan")
+        if self._face is None or key != self._face_key:
+            self._face = _face_for(key)
+            self._face_key = key
+        return self._face
 
     # ------------------------------------------------------------------ config
     def _use_image(self):
@@ -877,6 +953,11 @@ class Dashboard:
         self.lyric_t = float(stats.get("lyric_t", 1.0))
         self.lyric_effect = stats.get("lyric_effect") or "fade"
         self.lyric_visible = bool(stats.get("lyric_visible", False))
+        # the reveal length travels with the line (LyricState computes it from the
+        # glyph count); the non-lyric paths simply carry no key, so the default
+        # stands in. The face is re-picked every frame -- cached, so it is free.
+        self.lyric_dur = float(stats.get("lyric_dur", LYRIC_CHAR))
+        self._f_lyric = self._lyric_face()
 
     # ---------------------------------------------------------------- static
     def _load_bg_image(self, path):
@@ -1226,101 +1307,125 @@ class Dashboard:
         Drawing-time only: nothing here reaches the bake, so a new line costs no
         re-bake. The transparency has to come from a layer of its own -- an alpha
         in a *text* fill is ignored by ImageDraw's RGBA blend (measured: the
-        glyph lands opaque), so the line is rasterised once and pasted through
-        the layer's alpha instead.
+        glyph lands opaque), so each glyph is rasterised onto its own RGBA layer
+        and pasted through that layer's alpha instead.
         """
         if not self.lyric_visible or not self.lyric_text:
             return
         f = self._f_lyric
         span = SPEC_X1 - SPEC_X0
         txt = fit(self.lyric_text, f, span)
-        alpha = int(round(255 * max(0.3, min(1.0, float(self.cfg.lyrics_opacity)))))
+        if not txt:
+            return
+        base = int(round(255 * max(0.3, min(1.0, float(self.cfg.lyrics_opacity)))))
         t = max(0.0, min(1.0, float(self.lyric_t)))
-        if (self.lyric_effect or "fade") == "geom":
-            self._lyric_geom(img, txt, t, alpha)
-        else:
-            # cross-fade in place: the outgoing line hands its opacity over
-            prev = fit(self.lyric_prev, f, span) if self.lyric_prev else ""
-            self._lyric_paint(img, prev, int(alpha * (1.0 - t)))
-            self._lyric_paint(img, txt, int(alpha * t))
+        dur = max(1e-6, float(self.lyric_dur))
+        eff = self.lyric_effect or "fade"
+        # the outgoing line hands its opacity over, whole and in place (its own
+        # static seat), while the incoming one types itself in glyph by glyph
+        if self.lyric_prev and t < 1.0:
+            self._lyric_line(img, fit(self.lyric_prev, f, span), None,
+                             int(base * (1.0 - t)), 0.0)
+        self._lyric_line(img, txt, eff, base, t, dur)
 
-    def _lyric_layer(self, txt):
-        """The line rasterised once at full strength: glyphs over their halo.
+    def _lyric_cells(self, txt):
+        """The line broken into one small RGBA layer per glyph.
 
-        Memoised on the string, because the live line redraws every frame.
-        The halo is the stroke coverage *outside* the glyphs, so laying the ink
-        back over it costs nothing: a 1 px dark rim is what keeps the line
-        legible where it crosses a lit bar.
+        Returns ``(line_x, line_y, cells)``: the origin a plain
+        ``draw.text((line_x, line_y), txt)`` would use, and, per glyph, its layer
+        plus the ``(dx, dy)`` offset of that layer's top-left from the origin.
+        Every layer carries glow (optional), then its 1 px dark rim, then the
+        glyph on top, and its size follows the glyph's own ink box, so no face or
+        size can clip. Memoised on text + face + colour + glow -- the key must
+        carry all four or a panel switch would keep showing the old look.
         """
-        got = self._lyr_cache.get(txt)
-        if got is None:
-            f = self._f_lyric
-            p = LYRIC_PAD
-            w = int(math.ceil(f.getlength(txt))) + p * 2
-            h = LYRIC_H + p * 2
-            o = (p, ink_mid(f, txt, LYRIC_TOP, LYRIC_TOP + LYRIC_H) - LYRIC_TOP + p)
-            ink = Image.new("L", (w, h), 0)
-            ImageDraw.Draw(ink).text(o, txt, font=f, fill=255)
-            halo = Image.new("L", (w, h), 0)
-            ImageDraw.Draw(halo).text(o, txt, font=f, fill=255, stroke_width=1,
-                                      stroke_fill=255)
-            halo = ImageChops.subtract(halo, ink).point(
-                [v * 90 // 255 for v in range(256)])
-            under = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            under.putalpha(halo)
-            face = Image.new("RGBA", (w, h), TEXT + (0,))
-            face.putalpha(ink)
-            got = (Image.alpha_composite(under, face), (p, LYRIC_TOP - p))
-            if len(self._lyr_cache) > 16:
-                self._lyr_cache.clear()
-            self._lyr_cache[txt] = got
+        f = self._f_lyric
+        color = hex_rgb(getattr(self.cfg, "lyrics_color", "#eef3fb"), (238, 243, 251))
+        glow = bool(getattr(self.cfg, "lyrics_glow", True))
+        key = (txt, self._face_key, color, glow)
+        got = self._lyr_cache.get(key)
+        if got is not None:
+            return got
+        # the pad clears the 1 px rim; the glow needs its blur tail on top of it
+        m = LYRIC_PAD + (3 if glow else 0)
+        dark = tuple(int(c * 0.35) for c in color)
+        cells = []
+        adv = 0.0
+        for ch in txt:
+            bbox = f.getbbox(ch)
+            if ch.isspace() or not bbox or (bbox[2] - bbox[0] <= 0
+                                            and bbox[3] - bbox[1] <= 0):
+                # blank: a fully transparent 1x1 placeholder keeps the index
+                # aligned with the glyph without rasterising an empty layer
+                lay, dx, dy = Image.new("RGBA", (1, 1), (0, 0, 0, 0)), adv, 0
+            else:
+                w = bbox[2] - bbox[0] + 2 * m
+                h = bbox[3] - bbox[1] + 2 * m
+                o = (m - bbox[0], m - bbox[1])
+                ink = Image.new("L", (w, h), 0)
+                ImageDraw.Draw(ink).text(o, ch, font=f, fill=255)
+                full = Image.new("L", (w, h), 0)
+                ImageDraw.Draw(full).text(o, ch, font=f, fill=255,
+                                          stroke_width=1, stroke_fill=255)
+                ring = ImageChops.subtract(full, ink)
+                lay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+                if glow:
+                    g = Image.new("RGBA", (w, h), color + (0,))
+                    g.putalpha(ink.filter(ImageFilter.GaussianBlur(1.2)))
+                    lay = Image.alpha_composite(lay, g)
+                r = Image.new("RGBA", (w, h), dark + (0,))
+                r.putalpha(ring)
+                lay = Image.alpha_composite(lay, r)
+                face = Image.new("RGBA", (w, h), color + (0,))
+                face.putalpha(ink)
+                lay = Image.alpha_composite(lay, face)
+                # the glyph's ink lands at (line_x + bbox[0], line_y + bbox[1])
+                # were it drawn line-wide, so the layer sits m above/left of that
+                dx, dy = adv + bbox[0] - m, bbox[1] - m
+            cells.append((lay, dx, dy))
+            adv += f.getlength(ch)
+        line_x = int(SPEC_X0 + ((SPEC_X1 - SPEC_X0) - f.getlength(txt)) / 2)
+        line_y = ink_mid(f, txt, LYRIC_TOP, LYRIC_TOP + LYRIC_H)
+        got = (line_x, line_y, cells)
+        if len(self._lyr_cache) > 16:
+            self._lyr_cache.clear()
+        self._lyr_cache[key] = got
         return got
 
-    def _lyric_paint(self, img, txt, alpha):
-        """One paste of the line centred over the bars, at ``alpha`` of 255."""
-        if not txt or alpha <= 0:
-            return
-        lay, (p, top) = self._lyric_layer(txt)
-        lay = lay.copy()
-        lay.putalpha(lay.getchannel("A").point(_alpha_lut(alpha)))
-        x = int(SPEC_X0 + ((SPEC_X1 - SPEC_X0) - self._f_lyric.getlength(txt)) / 2)
-        img.paste(lay, (x - p, top), lay)
+    def _lyric_line(self, img, txt, eff, base, t, dur=0.0):
+        """One line typed in glyph by glyph, each glyph off its own seat.
 
-    def _lyric_geom(self, img, txt, t, alpha):
-        """The blocks fly home: three vertical strips per glyph, each pasted from
-        its own scattered seat and eased onto its place as ``t`` runs to 1.
-
-        A settled line takes the plain paste, so strips are cut only while a
-        transition actually runs: one layer build then a fixed number of crops
-        and pastes, never a per-pixel loop.
+        ``eff`` None marks the outgoing line: it is already settled, so every
+        glyph takes ``u = 1``. Otherwise ``u`` is the glyph's reveal progress and
+        carries its opacity (``base * u``) and its 3 px rise. ``geom`` also cuts
+        each still-moving glyph into three vertical blocks that fly together.
         """
-        if t >= 1.0:
-            self._lyric_paint(img, txt, alpha)
+        if not txt or base <= 0:
             return
-        f = self._f_lyric
-        lay, (p, top) = self._lyric_layer(txt)
-        # the layer swells its opacity across the move; the floor keeps the first
-        # frame of a line on screen -- and the scattered blocks visible -- rather
-        # than opening on a single fully transparent frame
-        lay = lay.copy()
-        lay.putalpha(lay.getchannel("A").point(
-            _alpha_lut(int(alpha * (0.30 + 0.70 * t)))))
-        x0 = int(SPEC_X0 + ((SPEC_X1 - SPEC_X0) - f.getlength(txt)) / 2)
-        ease = (1.0 - t) ** 2
-        edges = [0.0]
-        for ch in txt:
-            edges.append(edges[-1] + f.getlength(ch))
-        for ci, ch in enumerate(txt):
-            if not ch.strip():
+        line_x, line_y, cells = self._lyric_cells(txt)
+        settled = eff is None
+        for k, (lay, dx, dy) in enumerate(cells):
+            u = 1.0 if settled else word_u(t, dur, k)
+            a = int(base * u)
+            if a <= 0:
                 continue
-            a, b = edges[ci], edges[ci + 1]
-            for bi in range(3):
-                s0 = int(round(p + a + (b - a) * bi / 3.0))
-                s1 = max(s0 + 1, int(round(p + a + (b - a) * (bi + 1) / 3.0)))
-                jx, jy = _jitter(txt, ci, bi)
-                strip = lay.crop((s0, 0, s1, lay.height))
-                img.paste(strip, (x0 - p + s0 + int(round(jx * ease)),
-                                  top + int(round(jy * ease))), strip)
+            px = int(line_x + dx)
+            py = int(line_y + dy + _seat(txt, k) + int(round((1.0 - u) * LYRIC_RISE)))
+            if eff == "geom" and u < 1.0:
+                ease = (1.0 - u) ** 2
+                w = lay.width
+                for bi in range(3):
+                    s0 = int(round(w * bi / 3.0))
+                    s1 = max(s0 + 1, int(round(w * (bi + 1) / 3.0)))
+                    jx, jy = _jitter(txt, k, bi)
+                    strip = lay.crop((s0, 0, s1, lay.height))
+                    strip.putalpha(strip.getchannel("A").point(_alpha_lut(a)))
+                    _paste_overlay(img, strip, px + s0 + int(round(jx * ease)),
+                                   py + int(round(jy * ease)))
+            else:
+                one = lay.copy()
+                one.putalpha(one.getchannel("A").point(_alpha_lut(a)))
+                _paste_overlay(img, one, px, py)
 
     def _labels(self, d):
         """Card captions, redrawn each frame so the pool never tints them."""
