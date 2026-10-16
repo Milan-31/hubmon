@@ -25,6 +25,7 @@ import math
 import os
 import re
 import time
+import zlib
 from dataclasses import dataclass
 
 import numpy as np
@@ -104,6 +105,20 @@ def F(size, weight="regular"):
     if weight == "semibold":
         return _font(["seguisb.ttf", "segoeuib.ttf", "arialbd.ttf"], size)
     return _font(["segoeui.ttf", "arial.ttf"], size)
+
+
+# Chinese lyrics need a face the latin stack lacks; fall back to the UI font if
+# none of these ship, so the overlay still draws (just in a latin face).
+_CJK_NAMES = ("msyhbd.ttc", "msyh.ttc", "simhei.ttf")
+
+
+def _cjk(size):
+    for n in _CJK_NAMES:
+        try:
+            return ImageFont.truetype(f"{FONT_DIR}/{n}", size)
+        except Exception:
+            continue
+    return F(size, "bold")
 
 
 def hex_rgb(s, fallback):
@@ -613,6 +628,12 @@ SPEC_TICKS = ((100.0, "100"), (1000.0, "1k"), (10000.0, "10k"))
 SILENCE = [0.0] * BANDS      # a flat band, shared and never written to
 PAD = 12
 
+# The lyric overlay: one line hovering over the top of the bars, plus the margin
+# its rasterised layer carries so the 1 px halo is never clipped at the edge.
+LYRIC_TOP = SPEC_TOP + 4
+LYRIC_H = 16
+LYRIC_PAD = 2
+
 # The spectrum's styles, as (baked chrome, live bars). Chrome runs once per bake
 # and draws whatever is identical every frame; bars runs every frame. Adding a
 # style is two methods and one line here -- the dispatch itself never grows, and
@@ -650,6 +671,25 @@ def spec_x(i):
     """Left edge of band ``i``'s column, for the styles that fill a full pitch."""
     return int(SPEC_X0 + i * SPEC_PITCH)
 
+
+def _alpha_lut(a):
+    """Scale a layer's alpha by ``a``/255: the overlay's opacity, and during a
+    transition the share of it a line carries this frame."""
+    a = max(0, min(255, int(a)))
+    return [v * a // 255 for v in range(256)]
+
+
+def _jitter(txt, ci, bi):
+    """The scattered seat one strip starts from, in px.
+
+    Deterministic on purpose: the seed is a crc32, never the builtin hash, which
+    is salted per process -- the blocks would then land somewhere different on
+    every launch and would not line up between two runs of the same line.
+    """
+    s = zlib.crc32(f"{txt}|{ci}|{bi}".encode())
+    # the vertical swing is the smaller of the two: twice it would push the halo
+    # a row past the band the overlay is allowed to occupy
+    return (s % 21) - 10, ((s >> 8) % 9) - 4
 
 
 class Dashboard:
@@ -704,6 +744,16 @@ class Dashboard:
         self._f_net = F(11, "semibold")
         self._f_spec = F(11, "semibold")
         self._f_tick = F(9, "semibold")      # the spectrum's decade ticks
+        self._f_lyric = _cjk(15)             # the overlay line needs a CJK face
+
+        # lyric overlay: drawing-time fields, deliberately outside _look_sig, so
+        # a new line never re-bakes the chrome
+        self.lyric_text = ""
+        self.lyric_prev = ""
+        self.lyric_t = 1.0
+        self.lyric_effect = "fade"
+        self.lyric_visible = False
+        self._lyr_cache = {}                 # text -> (rasterised layer, offset)
 
         self._layout()
         self.apply_config(self.cfg, force=True)
@@ -822,6 +872,11 @@ class Dashboard:
         self.spectrum_bands = list(stats.get("spectrum_bands") or SILENCE)
         self.spectrum_peaks = list(stats.get("spectrum_peaks") or SILENCE)
         self.spec_state = stats.get("spec_state", "")
+        self.lyric_text = stats.get("lyric_text") or ""
+        self.lyric_prev = stats.get("lyric_prev") or ""
+        self.lyric_t = float(stats.get("lyric_t", 1.0))
+        self.lyric_effect = stats.get("lyric_effect") or "fade"
+        self.lyric_visible = bool(stats.get("lyric_visible", False))
 
     # ---------------------------------------------------------------- static
     def _load_bg_image(self, path):
@@ -1164,6 +1219,109 @@ class Dashboard:
             d.rectangle((x, SPEC_BOT - h + 1, x1, SPEC_BOT - h + 1),
                         fill=head + (255,))
 
+    # ------------------------------------------------------------------ lyric
+    def _lyric(self, img, d):
+        """The current line over the top of the bars, at the panel's opacity.
+
+        Drawing-time only: nothing here reaches the bake, so a new line costs no
+        re-bake. The transparency has to come from a layer of its own -- an alpha
+        in a *text* fill is ignored by ImageDraw's RGBA blend (measured: the
+        glyph lands opaque), so the line is rasterised once and pasted through
+        the layer's alpha instead.
+        """
+        if not self.lyric_visible or not self.lyric_text:
+            return
+        f = self._f_lyric
+        span = SPEC_X1 - SPEC_X0
+        txt = fit(self.lyric_text, f, span)
+        alpha = int(round(255 * max(0.3, min(1.0, float(self.cfg.lyrics_opacity)))))
+        t = max(0.0, min(1.0, float(self.lyric_t)))
+        if (self.lyric_effect or "fade") == "geom":
+            self._lyric_geom(img, txt, t, alpha)
+        else:
+            # cross-fade in place: the outgoing line hands its opacity over
+            prev = fit(self.lyric_prev, f, span) if self.lyric_prev else ""
+            self._lyric_paint(img, prev, int(alpha * (1.0 - t)))
+            self._lyric_paint(img, txt, int(alpha * t))
+
+    def _lyric_layer(self, txt):
+        """The line rasterised once at full strength: glyphs over their halo.
+
+        Memoised on the string, because the live line redraws every frame.
+        The halo is the stroke coverage *outside* the glyphs, so laying the ink
+        back over it costs nothing: a 1 px dark rim is what keeps the line
+        legible where it crosses a lit bar.
+        """
+        got = self._lyr_cache.get(txt)
+        if got is None:
+            f = self._f_lyric
+            p = LYRIC_PAD
+            w = int(math.ceil(f.getlength(txt))) + p * 2
+            h = LYRIC_H + p * 2
+            o = (p, ink_mid(f, txt, LYRIC_TOP, LYRIC_TOP + LYRIC_H) - LYRIC_TOP + p)
+            ink = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(ink).text(o, txt, font=f, fill=255)
+            halo = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(halo).text(o, txt, font=f, fill=255, stroke_width=1,
+                                      stroke_fill=255)
+            halo = ImageChops.subtract(halo, ink).point(
+                [v * 90 // 255 for v in range(256)])
+            under = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            under.putalpha(halo)
+            face = Image.new("RGBA", (w, h), TEXT + (0,))
+            face.putalpha(ink)
+            got = (Image.alpha_composite(under, face), (p, LYRIC_TOP - p))
+            if len(self._lyr_cache) > 16:
+                self._lyr_cache.clear()
+            self._lyr_cache[txt] = got
+        return got
+
+    def _lyric_paint(self, img, txt, alpha):
+        """One paste of the line centred over the bars, at ``alpha`` of 255."""
+        if not txt or alpha <= 0:
+            return
+        lay, (p, top) = self._lyric_layer(txt)
+        lay = lay.copy()
+        lay.putalpha(lay.getchannel("A").point(_alpha_lut(alpha)))
+        x = int(SPEC_X0 + ((SPEC_X1 - SPEC_X0) - self._f_lyric.getlength(txt)) / 2)
+        img.paste(lay, (x - p, top), lay)
+
+    def _lyric_geom(self, img, txt, t, alpha):
+        """The blocks fly home: three vertical strips per glyph, each pasted from
+        its own scattered seat and eased onto its place as ``t`` runs to 1.
+
+        A settled line takes the plain paste, so strips are cut only while a
+        transition actually runs: one layer build then a fixed number of crops
+        and pastes, never a per-pixel loop.
+        """
+        if t >= 1.0:
+            self._lyric_paint(img, txt, alpha)
+            return
+        f = self._f_lyric
+        lay, (p, top) = self._lyric_layer(txt)
+        # the layer swells its opacity across the move; the floor keeps the first
+        # frame of a line on screen -- and the scattered blocks visible -- rather
+        # than opening on a single fully transparent frame
+        lay = lay.copy()
+        lay.putalpha(lay.getchannel("A").point(
+            _alpha_lut(int(alpha * (0.30 + 0.70 * t)))))
+        x0 = int(SPEC_X0 + ((SPEC_X1 - SPEC_X0) - f.getlength(txt)) / 2)
+        ease = (1.0 - t) ** 2
+        edges = [0.0]
+        for ch in txt:
+            edges.append(edges[-1] + f.getlength(ch))
+        for ci, ch in enumerate(txt):
+            if not ch.strip():
+                continue
+            a, b = edges[ci], edges[ci + 1]
+            for bi in range(3):
+                s0 = int(round(p + a + (b - a) * bi / 3.0))
+                s1 = max(s0 + 1, int(round(p + a + (b - a) * (bi + 1) / 3.0)))
+                jx, jy = _jitter(txt, ci, bi)
+                strip = lay.crop((s0, 0, s1, lay.height))
+                img.paste(strip, (x0 - p + s0 + int(round(jx * ease)),
+                                  top + int(round(jy * ease))), strip)
+
     def _labels(self, d):
         """Card captions, redrawn each frame so the pool never tints them."""
         items = (("cpu", "CPU", "accent_cpu", ACCENT_CYAN),
@@ -1489,6 +1647,9 @@ class Dashboard:
         if c.mode == "spectrum":
             # the bars are the only thing in this mode that is not baked
             self._spectrum_bars(img, d)
+            # the lyric rides on top of them, and only when it is on
+            if c.lyrics_enable and self.lyric_visible:
+                self._lyric(img, d)
 
         # the pools fill next; every readout is then drawn on top of them
         for key, pct, theme in (("cpu", self.bar["cpu"], cpu_col),

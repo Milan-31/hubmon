@@ -76,6 +76,11 @@ class Config:
     spectrum_tilt: float = 3.0   # dB/octave of band tilt about 1 kHz
     spectrum_smoothing: float = 0.5   # envelope speed: 0 snappy | 1 slow
 
+    # ---- lyrics overlay ---------------------------------------------------
+    lyrics_enable: bool = False   # overlay the current song's lyric line
+    lyrics_effect: str = "rotate" # "fade" | "geom" | "rotate"
+    lyrics_opacity: float = 0.55  # 0.3 .. 1.0 alpha of the lyric text
+
     # ---- panel -------------------------------------------------------------
     ui_port: int = 8756
     open_browser: bool = True

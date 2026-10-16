@@ -233,6 +233,15 @@ SCHEMA = [
                  {"key": "spectrum_smoothing", "label": "灵敏度平滑", "type": "num",
                   "min": 0, "max": 1, "step": 0.05, "unit": ""},
              ]},
+            {"caption": "歌词（需在 QQ 音乐开启 SMTC 并完全重启客户端）", "when": {"key": "mode", "eq": "spectrum"},
+             "rows": [
+                 {"key": "lyrics_enable", "label": "显示歌词", "type": "bool"},
+                 {"key": "lyrics_effect", "label": "歌词动效", "type": "list",
+                  "options": [["fade", "渐隐"], ["geom", "几何重构"],
+                              ["rotate", "轮换"]]},
+                 {"key": "lyrics_opacity", "label": "歌词不透明度", "type": "num",
+                  "min": 0.3, "max": 1.0, "step": 0.05, "unit": ""},
+             ]},
             {"caption": "显示调节", "rows": [
                 {"key": "brightness", "label": "整体亮度", "type": "num",
                  "min": 0, "max": 2, "step": 0.05, "unit": "×"},

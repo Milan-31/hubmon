@@ -8,3 +8,10 @@ Pillow>=10.0
 pyusb>=1.2
 libusb-package>=1.0.26
 soundcard>=0.4.6
+
+# Modular WinRT: the SMTC media watcher (lyrics.MediaWatcher) reads the playing
+# track through it. Absent, the overlay silently degrades to "no lyric".
+winrt-runtime>=3.2
+winrt-Windows.Media.Control>=3.2
+winrt-Windows.Foundation>=3.2
+winrt-Windows.Foundation.Collections>=3.2

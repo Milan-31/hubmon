@@ -41,6 +41,16 @@ def main():
         # and the cffi backend have to travel with the bundle
         "--collect-all", "soundcard",
         "--hidden-import", "cffi",
+        # WinRT (the modular packages) backs the SMTC lyric watcher. ``winrt``
+        # is a namespace package with no __init__, so PyInstaller will not pull
+        # its leaf modules on its own: collect-all grabs the runtime binaries
+        # and extension modules, and the three leaf packages are named so their
+        # __init__ shims travel too. Without this the exe silently loses the
+        # lyric overlay.
+        "--collect-all", "winrt",
+        "--hidden-import", "winrt.windows.media.control",
+        "--hidden-import", "winrt.windows.foundation",
+        "--hidden-import", "winrt.windows.foundation.collections",
     ]
 
     # the app's own icon instead of PyInstaller's stock one; regenerate it with

@@ -20,7 +20,7 @@ import time
 import numpy as np
 import psutil
 
-from . import audio, config, transport, webui
+from . import audio, config, lyrics, transport, webui
 from .render import Dashboard, H, W, core_label
 from .sensors import Sensors
 
@@ -81,6 +81,12 @@ class Demo:
         # capture device: a travelling ripple under a bass-heavy tilt
         spec = [max(0.0, min(1.0, (0.35 + 0.6 * abs(math.sin(t * 0.8 + i * 0.30)))
                     * (1.0 - i / 30.0))) for i in range(audio.BANDS)]
+        # looped fake lyrics so the overlay previews without a player: a line
+        # holds for a few seconds, then the next slides in over the effect
+        lines = ["乔迁那日打扫废物", "家居仿似开战",
+                 "无意发现当天", "穿返学夏季衬衣"]
+        slot = int(t / 3.0)
+        j = slot % len(lines)
         return dict(
             spectrum_bands=spec,
             spectrum_peaks=[min(1.0, v + 0.12) for v in spec],
@@ -94,7 +100,10 @@ class Demo:
             mem_used_gb=16.4, mem_total_gb=34.2, cpu_perf=100 + 0.9 * cpu,
             cpu_name="12th Gen Intel(R) Core(TM) i5-12400F", gpu_name="RTX 5060",
             fg_app="GameViewer.exe", fg_fps=138 + 12 * math.sin(t * 0.9),
-            host="MILAN", board_name="Z690M Snow Dream")
+            host="MILAN", board_name="Z690M Snow Dream",
+            lyric_text=lines[j], lyric_prev=lines[j - 1],
+            lyric_t=min(1.0, (t - slot * 3.0) / 0.4),
+            lyric_effect="geom" if slot % 2 else "fade", lyric_visible=True)
 
 
 def run_preview(cfg, outdir, frames, fps):
@@ -132,6 +141,9 @@ def stats_provider(dash, state):
                  fg_app=v.fg_app, fg_fps=round(v.fg_fps, 1), host=v.host,
                  spectrum_bands=list(dash.spectrum_bands),
                  spectrum_peaks=list(dash.spectrum_peaks))
+        d["lyric_text"] = dash.lyric_text
+        d["lyric_visible"] = dash.lyric_visible
+        d["lyric_effect"] = dash.lyric_effect
         return d
     return provider
 
@@ -148,6 +160,12 @@ def run_stream(cfg, demo=False, log_every=5.0):
     if not demo:
         sensor.start()
     spec = audio.Spectrum(cfg.spectrum_device, cfg.spectrum_tilt, cfg.spectrum_smoothing)
+    watcher = lyrics.MediaWatcher()
+    track = {"song": "", "lines": []}      # fetch once per track, not per frame
+    provider_lyrics = lyrics.Lyrics()
+    lstate = lyrics.LyricState()
+    if not demo:
+        watcher.start()
     screen = transport.LiveScreen()
 
     try:
@@ -222,6 +240,20 @@ def run_stream(cfg, demo=False, log_every=5.0):
                     stats["spectrum_bands"] = bands
                     stats["spectrum_peaks"] = peaks
                 stats["spec_state"] = spec.state
+                if want_spec and cfg.lyrics_enable and not demo:
+                    snap = watcher.snapshot()
+                    song = "%s|%s" % (snap["title"], snap["artist"])
+                    if song != track["song"]:          # new track: look up once
+                        track["song"] = song
+                        track["lines"] = provider_lyrics.lines_for(
+                            snap["title"], snap["artist"], snap["album"],
+                            snap["duration_s"], snap["song_id"])
+                    lst = lstate.update(cfg, snap, track["lines"], dt)
+                    stats["lyric_text"] = lst["text"]
+                    stats["lyric_prev"] = lst["prev"]
+                    stats["lyric_t"] = lst["t"]
+                    stats["lyric_effect"] = lst["effect"]
+                    stats["lyric_visible"] = lst["visible"]
                 dash.update(stats)
                 img = dash.render(dt)
                 cur = dash.to_rgb565_be(img)
@@ -294,6 +326,7 @@ def run_stream(cfg, demo=False, log_every=5.0):
         if not demo:
             sensor.stop()
         spec.stop()
+        watcher.stop()
         screen.close()
         webui.stop(panel)
         print(f"[hubmon] stopped after {sent} frames, "
