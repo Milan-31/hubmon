@@ -656,6 +656,10 @@ PAD = 12
 LYRIC_TOP = SPEC_TOP + 3
 LYRIC_H = 24
 LYRIC_PAD = 3
+# A latin line too wide for the band wraps onto a second line rather than being
+# elided, so a second band exists and starts this far below the first -- just past
+# one band's height, with a little air between the two rows of type.
+LYRIC_LINE_STEP = 25
 # the entrance rise, in px, a still-hidden glyph starts below its seat
 LYRIC_RISE = 3
 # The geom effect's shards keep this share of their opacity while they are still
@@ -668,10 +672,12 @@ LYRIC_GEOM_FLOOR = 0.6
 # measured, not guessed (see build/_pool/lyric_envelope.py). The window's top
 # sits 1 px above SPEC_TOP because a 21 px CJK face inks 22 px tall, which in a
 # 24 px band leaves too little room for the sway above the ink. It governs
-# everything that *rests*: the settled line and the fade reveal. The geom
-# shatter is exempt by design -- its shards cross the whole panel before landing.
+# everything that *rests*: the settled lines and the fade reveal. The bottom
+# clears the second band's own overhang, so a wrapped line is never trimmed to
+# one row, and the geom shatter is exempt by design -- its shards cross the whole
+# panel before landing.
 LYRIC_WIN_TOP = SPEC_TOP - 1
-LYRIC_WIN_BOT = SPEC_TOP + 34
+LYRIC_WIN_BOT = LYRIC_TOP + LYRIC_LINE_STEP + LYRIC_H + 8
 
 # The spectrum's styles, as (baked chrome, live bars). Chrome runs once per bake
 # and draws whatever is identical every frame; bars runs every frame. Adding a
@@ -762,6 +768,64 @@ def _seat(txt, k):
     a random draw per frame would make the whole sentence shimmer.
     """
     return (zlib.crc32(f"{txt}|{k}".encode()) % 7) - 3
+
+
+def _seat_units(txt):
+    """Per-glyph seat group: a latin word shares one seat, everything else its own.
+
+    Seating each *letter* of an English lyric made the word itself wobble -- every
+    glyph took its own hash offset, so 'Lovers' rippled letter by letter. Letters
+    inside a latin word now share the word's unit, so the word keeps one seat,
+    while CJK glyphs and stray punctuation still take one unit each -- which is
+    the per-glyph 错落 the Chinese lines want.
+    """
+    units, u, in_word = [], -1, False
+    for ch in txt:
+        wordy = (ch.isascii() and ch.isalnum()) or ch in "'-’"
+        if wordy:
+            if not in_word:
+                u += 1
+            in_word = True
+        else:
+            in_word = False
+            u += 1
+        units.append(u)
+    return units
+
+
+def _wrap(txt, font, span):
+    """Lay ``txt`` out on one or two lines, each within ``span`` px.
+
+    An English lyric routinely outruns the 304 px band, and eliding it ("…") cut
+    the line off. It now breaks at a word boundary instead -- choosing the break
+    that balances the two rows -- and only falls back to a mid-word split (or, if
+    even two rows cannot hold it, to the old ellipsis) when no space break fits.
+    CJK lines, which have no spaces, simply wrap by glyph. Returns at least one
+    line; a line that fits comes back untouched.
+    """
+    if font.getlength(txt) <= span:
+        return [txt]
+    words = txt.split(" ")
+    best = None
+    if len(words) > 1:
+        for i in range(1, len(words)):
+            a, b = " ".join(words[:i]), " ".join(words[i:])
+            if font.getlength(a) <= span and font.getlength(b) <= span:
+                gap = abs(font.getlength(a) - font.getlength(b))
+                if best is None or gap < best[0]:
+                    best = (gap, [a, b])
+    if best is not None:
+        return best[1]
+    half, acc, cut = font.getlength(txt) / 2.0, 0.0, len(txt) // 2
+    for i, ch in enumerate(txt):
+        if acc >= half:
+            cut = i
+            break
+        acc += font.getlength(ch)
+    a, b = txt[:cut], txt[cut:]
+    if a and b and font.getlength(a) <= span and font.getlength(b) <= span:
+        return [a, b]
+    return [fit(a, font, span), fit(b, font, span)] if b else [fit(txt, font, span)]
 
 
 class Dashboard:
@@ -1321,11 +1385,6 @@ class Dashboard:
         """
         if not self.lyric_visible or not self.lyric_text:
             return
-        f = self._f_lyric
-        span = SPEC_X1 - SPEC_X0
-        txt = fit(self.lyric_text, f, span)
-        if not txt:
-            return
         base = int(round(255 * max(0.3, min(1.0, float(self.cfg.lyrics_opacity)))))
         t = max(0.0, min(1.0, float(self.lyric_t)))
         dur = max(1e-6, float(self.lyric_dur))
@@ -1335,25 +1394,41 @@ class Dashboard:
         # from all over the panel and a whole sentence sitting behind them would
         # only muddy the shatter.
         if self.lyric_prev and t < 1.0 and eff != "geom":
-            self._lyric_line(img, fit(self.lyric_prev, f, span), None,
-                             int(base * (1.0 - t)), 0.0)
-        self._lyric_line(img, txt, eff, base, t, dur)
+            self._lyric_text(img, self.lyric_prev, None, int(base * (1.0 - t)), 0.0, dur)
+        self._lyric_text(img, self.lyric_text, eff, base, t, dur)
 
-    def _lyric_cells(self, txt):
-        """The line broken into one small RGBA layer per glyph.
+    def _lyric_text(self, img, text, eff, base, t, dur):
+        """Lay ``text`` out as one or two centred rows and draw its glyphs.
+
+        A row wider than the band wraps onto a second band rather than being
+        elided, so a full-length latin lyric is shown whole. Both rows share one
+        reveal clock -- the glyph index runs on across the wrap -- so the
+        sentence types itself out left to right, first row then second.
+        """
+        f = self._f_lyric
+        lines = _wrap(text, f, SPEC_X1 - SPEC_X0)
+        k = 0
+        for i, txt in enumerate(lines):
+            self._lyric_line(img, txt, eff, base, t, dur, k,
+                             LYRIC_TOP + i * LYRIC_LINE_STEP)
+            k += len(txt)
+
+    def _lyric_cells(self, txt, band_top=LYRIC_TOP):
+        """The row broken into one small RGBA layer per glyph.
 
         Returns ``(line_x, line_y, cells)``: the origin a plain
-        ``draw.text((line_x, line_y), txt)`` would use, and, per glyph, its layer
-        plus the ``(dx, dy)`` offset of that layer's top-left from the origin.
-        Every layer carries glow (optional), then its 1 px dark rim, then the
-        glyph on top, and its size follows the glyph's own ink box, so no face or
-        size can clip. Memoised on text + face + colour + glow -- the key must
-        carry all four or a panel switch would keep showing the old look.
+        ``draw.text((line_x, line_y), txt)`` would use, and, per glyph, its layer,
+        the ``(dx, dy)`` offset of that layer's top-left from the origin, and the
+        seat its group sits at. Every layer carries glow (optional), then its
+        1 px dark rim, then the glyph on top, and its size follows the glyph's own
+        ink box, so no face or size can clip. Memoised on text + face + colour +
+        glow + band -- the key must carry all of those, or a switch (or the same
+        text on the second row) would keep showing the old look.
         """
         f = self._f_lyric
         color = hex_rgb(getattr(self.cfg, "lyrics_color", "#eef3fb"), (238, 243, 251))
         glow = bool(getattr(self.cfg, "lyrics_glow", True))
-        key = (txt, self._face_key, color, glow)
+        key = (txt, self._face_key, color, glow, band_top)
         got = self._lyr_cache.get(key)
         if got is not None:
             return got
@@ -1362,7 +1437,8 @@ class Dashboard:
         dark = tuple(int(c * 0.35) for c in color)
         cells = []
         adv = 0.0
-        for ch in txt:
+        units = _seat_units(txt)
+        for k, ch in enumerate(txt):
             bbox = f.getbbox(ch)
             if ch.isspace() or not bbox or (bbox[2] - bbox[0] <= 0
                                             and bbox[3] - bbox[1] <= 0):
@@ -1393,34 +1469,37 @@ class Dashboard:
                 # the glyph's ink lands at (line_x + bbox[0], line_y + bbox[1])
                 # were it drawn line-wide, so the layer sits m above/left of that
                 dx, dy = adv + bbox[0] - m, bbox[1] - m
-            cells.append((lay, dx, dy))
+            cells.append((lay, dx, dy, _seat(txt, units[k])))
             adv += f.getlength(ch)
         line_x = int(SPEC_X0 + ((SPEC_X1 - SPEC_X0) - f.getlength(txt)) / 2)
-        line_y = ink_mid(f, txt, LYRIC_TOP, LYRIC_TOP + LYRIC_H)
+        line_y = ink_mid(f, txt, band_top, band_top + LYRIC_H)
         got = (line_x, line_y, cells)
         if len(self._lyr_cache) > 16:
             self._lyr_cache.clear()
         self._lyr_cache[key] = got
         return got
 
-    def _lyric_line(self, img, txt, eff, base, t, dur=0.0):
-        """One line typed in glyph by glyph, each glyph off its own seat.
+    def _lyric_line(self, img, txt, eff, base, t, dur=0.0,
+                    k_base=0, band_top=LYRIC_TOP):
+        """One row typed in glyph by glyph, each glyph off its group's seat.
 
-        ``eff`` None marks the outgoing line: it is already settled, so every
+        ``eff`` None marks the outgoing row: it is already settled, so every
         glyph takes ``u = 1``. Otherwise ``u`` is the glyph's reveal progress and
-        carries its opacity (``base * u``) and its 3 px rise. ``geom`` also cuts
-        each still-moving glyph into three vertical shards that fly home from
-        points scattered across the whole panel.
+        carries its opacity (``base * u``) and its 3 px rise; ``k_base`` is the
+        glyph index this row starts at, so a wrapped pair reveals as one run.
+        ``geom`` also cuts each still-moving glyph into three vertical shards that
+        fly home from points scattered across the whole panel.
         """
         if not txt or base <= 0:
             return
-        line_x, line_y, cells = self._lyric_cells(txt)
+        line_x, line_y, cells = self._lyric_cells(txt, band_top)
         settled = eff is None
-        for k, (lay, dx, dy) in enumerate(cells):
+        for i, (lay, dx, dy, seat) in enumerate(cells):
+            k = k_base + i
             u = (1.0 if settled else
                  word_u(t, dur, k, LYRIC_GEOM_SLOW if eff == "geom" else 1.0))
             px = int(line_x + dx)
-            py = int(line_y + dy + _seat(txt, k) + int(round((1.0 - u) * LYRIC_RISE)))
+            py = int(line_y + dy + seat + int(round((1.0 - u) * LYRIC_RISE)))
             if eff == "geom" and u < 1.0:
                 # The glyph breaks into three vertical shards; each starts from its
                 # own hash-picked point on the panel and eases onto its seat. The
