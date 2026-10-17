@@ -327,6 +327,30 @@ _EMPTY = {"title": "", "artist": "", "album": "", "status": "none",
           "position_s": 0.0, "duration_s": 0.0, "song_id": ""}
 
 
+def _select(infos):
+    """The one live session the panel should report, out of everything SMTC has.
+
+    Several players can be going at once -- a QQ Music track underneath a browser
+    video, say -- and Windows' *current* session then follows whatever the system
+    last deemed active, which is frequently the browser. That session's "title"
+    is a web page and its artist is empty, and feeding it through the match gate
+    blanked the overlay although a real song was plainly playing. So every
+    playing session is ranked instead, and the injected QQ id or a real artist
+    outranks a bare page title; only when nothing is playing does the current
+    session stand in (paused, so the overlay hides as before).
+
+    ``infos`` are the dicts built by MediaWatcher._read, plus ``playing`` and
+    ``current``. Returns a snapshot shaped like ``_EMPTY`` (the ranking flags
+    dropped), or the empty snapshot when there is nothing to report.
+    """
+    pool = [i for i in infos if i["playing"]] or [i for i in infos if i["current"]]
+    if not pool:
+        return dict(_EMPTY)
+    best = max(pool, key=lambda i: (bool(i["song_id"]), bool(i["artist"]),
+                                    bool(i["title"]), i["current"]))
+    return {k: best.get(k, v) for k, v in _EMPTY.items()}
+
+
 class MediaWatcher:
     """Poll the Windows media session for the playing track, off the UI thread.
 
@@ -372,6 +396,28 @@ class MediaWatcher:
         with self._lock:
             self._snap = snap
 
+    def _read(self, loop, session):
+        """Extract one session's fields, with the two ranking flags attached."""
+        try:
+            props = loop.run_until_complete(
+                session.try_get_media_properties_async())
+            ps = int(session.get_playback_info().playback_status)
+            tl = session.get_timeline_properties()
+            return {
+                "title": str(props.title or ""),
+                "artist": str(props.artist or ""),
+                "album": str(props.album_title or ""),
+                "status": ("playing" if ps == 4 else
+                           "paused" if ps == 5 else "none"),
+                "position_s": float(tl.position.total_seconds()),
+                "duration_s": float(tl.end_time.total_seconds()),
+                "song_id": _parse_song_id(props.genres),
+                "playing": ps == 4,
+                "current": False,
+            }
+        except Exception:
+            return None                  # a dying session is simply skipped
+
     def _run(self):
         _com_apartment()               # the apartment belongs to this thread
         try:
@@ -383,24 +429,14 @@ class MediaWatcher:
             return
         while not self._stop.is_set():
             try:
-                session = mgr.get_current_session()
-                if session is None:
-                    self._write(dict(_EMPTY))
-                else:
-                    props = loop.run_until_complete(
-                        session.try_get_media_properties_async())
-                    ps = int(session.get_playback_info().playback_status)
-                    tl = session.get_timeline_properties()
-                    self._write({
-                        "title": str(props.title or ""),
-                        "artist": str(props.artist or ""),
-                        "album": str(props.album_title or ""),
-                        "status": ("playing" if ps == 4 else
-                                   "paused" if ps == 5 else "none"),
-                        "position_s": float(tl.position.total_seconds()),
-                        "duration_s": float(tl.end_time.total_seconds()),
-                        "song_id": _parse_song_id(props.genres),
-                    })
+                cur = mgr.get_current_session()
+                infos = []
+                for s in mgr.get_sessions():
+                    info = self._read(loop, s)
+                    if info is not None:
+                        info["current"] = s == cur
+                        infos.append(info)
+                self._write(_select(infos))
             except Exception:
                 self._write(dict(_EMPTY))   # a bad read must not kill the poller
             self._stop.wait(self.poll)

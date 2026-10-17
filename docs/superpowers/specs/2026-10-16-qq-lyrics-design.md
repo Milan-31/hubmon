@@ -186,3 +186,31 @@ winrt-Windows.Foundation.Collections
 **注意**：`_pick` 的签名变了（多一个 `title`），`lyric_api.py` 已同步。
 
 **留给用户的取舍**：LRC 里紧跟标题行的「词：/曲：/编曲：」信用行**未过滤**（它们确实是源歌词的一部分，QQ 音乐自带歌词面板也会显示）。若要一并隐藏，说一声即可。
+
+## 14. 实现期修订：会话选择不能只看「当前会话」（2026-10-17）
+
+**实机缺陷**：QQ 音乐与其他程序（浏览器视频）**同时播放**时，歌词整块不显示。
+
+**实测根因**（`build/_pool/smtc_watch.py` 现场取证，非推测）：
+
+```
+current=Chrome
+  QQMusic.exe:st=4 pos=36.2 end=218.4 'Lovers Still Alone'/'Sawyer Fredericks'
+ *Chrome:st=4 pos=200.0 end=559.9 '抖音-记录美好生活'/''
+```
+
+两个会话**都是 `st=4`（正在播放）**，而 Windows 把「当前会话」（`get_current_session()`）判给了 **Chrome**。于是取到的是**网页标题** `抖音-记录美好生活`、artist 为空 → 被 §13 的正证据闸门挡掉 → 歌词整块消失，即使 QQ 音乐明明在放歌。也就是说 §13 的闸门是对的，但它拿到的是**错误的会话**。
+
+**修订**：`MediaWatcher._run` 不再只读 `get_current_session()`，而是枚举 `get_sessions()`，用新纯函数 `_select(infos)` 在所有**正在播放**的会话里按优先级挑选：
+
+| 优先级 | 依据 | 理由 |
+|---|---|---|
+| 1 | `genres` 含 `QQ-<id>`（ID-Injector） | 最强的正证据 |
+| 2 | `artist` 非空 | 真实曲目 vs 网页标题 |
+| 3 | `title` 非空 | — |
+| 4 | 是当前会话 | 平局时偏向系统判定 |
+
+- 只有当**没有任何会话在播放**时，才退回「当前会话」（此时它是暂停/停止态，状态字段驱动歌词隐去，行为与 §13 一致）。
+- 刻意**不在 watcher 里做网络判定资格**（那属于 `_pick` 的职责），只用 SMTC 自带元数据做启发式。
+- `_read()` 把两个排序标记 `playing` / `current` 附在信息字典上；`_select()` 返回时按 `_EMPTY` 的键集剪掉标记，快照结构不变。
+- 覆盖脚本 `build/_pool/lyric_session.py`：覆盖「QQ + 浏览器同时播放（且浏览器为当前会话）→ 选 QQ」「注入 id 胜过 artist」「无播放时退回当前会话」「空列表 → 空快照」，并断言输出键集恰为 `_EMPTY`。
