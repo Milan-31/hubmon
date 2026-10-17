@@ -77,15 +77,65 @@ _TIMEOUT = 6.0
 # once survives a restart without re-hitting the network every launch.
 LYRIC_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
                          "hubmon", "lyrics")
+# Bumped whenever a cached table would have been produced differently, so stale
+# entries from an older matcher stop being served (see lines_for).
+_CACHE_VER = "2"
 
 
-def _pick(cands, song_id, artist, album, duration):
-    """Best-matching search hit for the playing track, or None if there are none.
+def _norm(s):
+    """Letters and digits only, lower-cased, for comparing names loosely."""
+    return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+
+def _agrees(a, b):
+    """Whether two names mean the same thing, allowing either to carry extras.
+
+    Loose on purpose: a session's title is often '夜曲 (Live)' where the search
+    hit is plain '夜曲', or the reverse. Each side needs two characters of
+    substance first, so a stray single letter cannot match everything.
+    """
+    a, b = _norm(a), _norm(b)
+    return len(a) >= 2 and len(b) >= 2 and (a in b or b in a)
+
+
+# QQ's lyric blobs open with a credit row -- '[00:00.00]夜曲 - 周杰伦 (Jay Chou)'
+# -- which repeats the title the session already gave us and would otherwise be
+# shown as the first "lyric". Only the *opening* rows are dropped, and only when
+# they repeat the track's own name, so a real line that merely starts with the
+# title, or any line further into the song, is never touched.
+_HDR_SEP = re.compile(r"\s*[-–—|·:：]\s*")
+
+
+def _strip_header(lines, title, artist):
+    """Drop the lyric table's leading 'song - singer' credit rows."""
+    if not title:
+        return lines
+    t, a = _norm(title), _norm(artist or "")
+    i = 0
+    while i < len(lines):
+        text = lines[i][1]
+        n = _norm(text)
+        if not (n == t or n == t + a
+                or (_HDR_SEP.search(text) and n.startswith(t))):
+            break
+        i += 1
+    return lines[i:]
+
+
+def _pick(cands, title, song_id, artist, album, duration):
+    """The search hit the track's own metadata corroborates, or None.
 
     An injected numeric id (QQMusic-ID-Injector writes it into the SMTC genres)
-    is authoritative and short-circuits the fuzzy score. Otherwise score by
-    artist / album / duration; the first candidate wins ties, so a weak match
-    still yields *a* lyric instead of nothing.
+    is authoritative and short-circuits everything. Otherwise a hit is only
+    *eligible* when the metadata backs it -- its name agrees with the session's
+    title, or its singer and its length both agree -- and the eligible hits are
+    then ranked by artist / album / duration. Nothing eligible means no lyric.
+
+    Eligible is the whole point. Searching blind and taking the first hit pastes
+    some arbitrary song onto the panel: a session whose "title" is not a song at
+    all (a browser tab, a video page) resolved to whatever the search happened to
+    return first, and '抖音-记录美好生活' came back as 夜曲 -- a track that was
+    not playing. Better to show nothing than to show the wrong song.
     """
     if not cands:
         return None
@@ -94,22 +144,21 @@ def _pick(cands, song_id, artist, album, duration):
         for c in cands:
             if str(c.get("id")) == sid:
                 return c
-    if not (artist or album or duration):
-        return cands[0]
-    best, best_score = cands[0], -1.0
+    best, best_score = None, -1.0
     for c in cands:
-        score = 0.0
         singers = c.get("singer") or []
-        if artist and any(artist in (s.get("name") or "") for s in singers):
-            score += 3
-        if album and album == ((c.get("album") or {}).get("name") or ""):
-            score += 2
+        artist_ok = bool(artist) and any(
+            _agrees(s.get("name") or "", artist) for s in singers)
         iv = c.get("interval")
-        if duration and isinstance(iv, (int, float)):
-            gap = abs(iv - duration)
-            if gap <= 3:
-                score += 3
-                score += max(0.0, 3 - gap)     # closer wins inside the window
+        gap = abs(iv - duration) if (duration and isinstance(iv, (int, float))) else None
+        dur_ok = gap is not None and gap <= 3
+        if not (_agrees(c.get("name") or "", title) or (artist_ok and dur_ok)):
+            continue                     # the metadata does not back this hit
+        score = 3.0 if artist_ok else 0.0
+        if album and album == ((c.get("album") or {}).get("name") or ""):
+            score += 2.0
+        if dur_ok:
+            score += 3.0 + max(0.0, 3.0 - gap)   # closer wins inside the window
         if score > best_score:                 # strict > keeps the first on ties
             best, best_score = c, score
     return best
@@ -184,16 +233,28 @@ class Lyrics:
             return []
         return parse_lrc(base64.b64decode(blob).decode("utf-8", "replace"))
 
-    def _fetch_fallback(self, title, artist):
-        """NetEase public API: search the song, then read its lrc blob."""
+    def _fetch_fallback(self, title, artist, album, duration, song_id):
+        """NetEase public API: search the song, then read the chosen hit's blob.
+
+        Its search is as blind as QQ's, so the same corroboration gate runs here
+        (the hits are reshaped into QQ's field names first). Without it the root
+        cause would merely move to this path the moment QQ came back empty.
+        """
         kw = urllib.parse.quote(" ".join(p for p in (title, artist) if p))
-        hits = (self._get("https://music.163.com/api/search/get/web"
-                          "?s=%s&type=1&limit=5&offset=0" % kw)
-                .get("result") or {}).get("songs") or []
-        if not hits:
+        raw = (self._get("https://music.163.com/api/search/get/web"
+                         "?s=%s&type=1&limit=5&offset=0" % kw)
+               .get("result") or {}).get("songs") or []
+        hits = [{"id": h.get("id"), "name": h.get("name"),
+                 "singer": [{"name": a.get("name")}
+                            for a in (h.get("artists") or [])],
+                 "album": {"name": (h.get("album") or {}).get("name")},
+                 "interval": (h.get("duration") or 0) / 1000.0}
+                for h in raw]
+        pick = _pick(hits, title, song_id, artist, album, duration)
+        if not pick:
             return []
         blob = (self._get("https://music.163.com/api/song/lyric"
-                          "?id=%s&lv=1&kv=1&tv=-1" % hits[0].get("id"))
+                          "?id=%s&lv=1&kv=1&tv=-1" % pick.get("id"))
                 .get("lrc") or {}).get("lyric") or ""
         return parse_lrc(blob)
 
@@ -201,23 +262,28 @@ class Lyrics:
         """Return the [(seconds, text)] table for a track, or [] on any failure."""
         if not title:
             return []
-        key = hashlib.sha1(("%s|%s" % (title, artist)).encode("utf-8")).hexdigest()
+        # The version tag retires tables cached before the corroboration gate:
+        # those were matched blind, so a wrong one (a browser page's title
+        # resolving to some random song) would otherwise keep coming back.
+        key = hashlib.sha1(("%s|%s|%s" % (_CACHE_VER, title, artist))
+                           .encode("utf-8")).hexdigest()
         cached = self._cache_get(key)
         if cached is not None:
             return cached
         lines = []
         try:
             pick = _pick(self._search("%s %s" % (title, artist)),
-                         song_id, artist, album, duration)
+                         title, song_id, artist, album, duration)
             if pick:
                 lines = self._fetch_lyric(pick.get("mid"))
         except Exception:
             lines = []
         if not lines:                       # QQ had nothing (or failed): try NetEase
             try:
-                lines = self._fetch_fallback(title, artist)
+                lines = self._fetch_fallback(title, artist, album, duration, song_id)
             except Exception:
                 lines = []
+        lines = _strip_header(lines, title, artist)
         if lines:
             self._cache_put(key, lines)
         return lines
