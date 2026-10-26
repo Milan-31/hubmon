@@ -27,58 +27,6 @@ from .render import Dashboard, H, W, core_label
 
 VENDOR_NAMES = ("佳点V1PRO控制工具", "usb_send_gif")
 
-# dirty-region tile size. 1x5 tiles cut a typical frame from 21 KB to 7 KB; a
-# batch carries six of them per command, so the finer grid stays affordable and
-# the USB side measured 11.9 ms/frame for a whole frame.
-TILE_W, TILE_H = 1, 5
-# if nearly the whole screen changed, a full frame is simpler. With 1x5 tiles a
-# full-screen patch set costs about the same as a full frame (108 KB, ~150 ms),
-# so switching earlier only adds latency spikes; medium changes stay as patches.
-FULL_THRESHOLD = 0.95
-# occasional full frame to guarantee the panel cannot drift out of sync
-RESYNC_EVERY = 120.0
-
-
-def dirty_rects(prev, cur):
-    """Rectangles covering every tile that differs between two RGB565 buffers.
-
-    Row runs are merged vertically whenever consecutive rows share the exact
-    same x span, which cuts the command count without adding a byte.
-    """
-    a = np.frombuffer(prev, np.uint8).reshape(H, W, 2)
-    b = np.frombuffer(cur, np.uint8).reshape(H, W, 2)
-    tiles = (a != b).any(axis=2).reshape(H // TILE_H, TILE_H,
-                                        W // TILE_W, TILE_W).any(axis=(1, 3))
-    # Tile-row runs, found from the edges of each row instead of scanning every
-    # tile in Python: a zero-padded row turns each run into a +1/-1 pair, and
-    # the transitions come out of one diff. Rows never interleave, so the k-th
-    # start pairs with the k-th end.
-    rows, cols = tiles.shape
-    pad = np.zeros((rows, cols + 2), np.int8)
-    pad[:, 1:-1] = tiles
-    edges = np.diff(pad, axis=1)
-    starts = np.argwhere(edges == 1)
-    ends = np.argwhere(edges == -1)
-    runs = [(int(s[1]) * TILE_W, int(s[0]) * TILE_H,
-             int(e[1] - s[1]) * TILE_W, TILE_H)
-            for s, e in zip(starts, ends)]
-    spans = {}
-    for (x, y, w, h) in runs:
-        spans.setdefault((x, w), []).append((y, h))
-    rects = []
-    for (x, w), rows in spans.items():
-        rows.sort()
-        y0, h = rows[0]
-        for y, hh in rows[1:]:
-            if y == y0 + h:
-                h += hh
-            else:
-                rects.append((x, y0, w, h))
-                y0, h = y, hh
-        rects.append((x, y0, w, h))
-    total = sum(w * h * 2 for (_, _, w, h) in rects)
-    return rects, total
-
 
 def vendor_running():
     for p in psutil.process_iter(["name"]):
@@ -247,8 +195,14 @@ class _Sender:
         # commands at the device back-to-back, which makes its writes stall
         self.tasks = ctx.Queue(maxsize=1)
         self.events = ctx.Queue()
+        # The worker hands one credit back per frame it finishes. Waiting on it
+        # wakes the moment the link is free; polling the queue instead cost a
+        # whole millisecond of timer granularity per frame, which capped an
+        # otherwise ~2 ms pipeline near 450 fps.
+        self.credits = ctx.Semaphore(1)
         self.proc = ctx.Process(target=usbsend.run,
-                                args=(self.tasks, self.events), daemon=True)
+                                args=(self.tasks, self.events, self.credits),
+                                daemon=True)
         self.proc.start()
         self._base_frames, self._base_bytes = base
         self.error = None
@@ -328,24 +282,40 @@ class _Sender:
                 self.error = msg[1].strip().splitlines()[-1]
                 return ("error", self.error)
 
-    def submit(self, kind, payload, moved, patches):
-        item = (kind, payload, moved, patches)
+    def ready(self, timeout=0.02):
+        """Wait for the worker to be able to take another frame."""
         try:
-            self.tasks.put_nowait(item)
+            return bool(self.credits.acquire(timeout=timeout))
+        except Exception as e:
+            self.error = _err_text(e)
+            return True
+
+    def submit(self, kind, payload, moved, patches):
+        """Hand one prepared frame to the worker.
+
+        The conversion, diff and packing are already done; the worker only
+        writes the packets, so its process is never in front of the USB write
+        doing CPU work of its own.
+        """
+        try:
+            self.tasks.put_nowait((kind, payload, moved, patches))
             return True
         except queue.Full:
-            # The worker is still busy with an earlier frame. Leave that one
-            # queued: it is the newest frame the device will actually receive,
-            # and the caller only advances its "what the panel shows" buffer
-            # when a frame is accepted. Evicting it to squeeze this frame in
-            # used to make the caller diff against a frame the panel never got,
-            # so digits and animations that changed in the skipped frame stayed
-            # on screen as leftovers.
+            # the caller already holds a credit it must hand back, or the
+            # worker would wait for a frame that never arrives
             self.dropped += 1
+            self._release()
             return False
         except Exception as e:
             self.error = _err_text(e)
+            self._release()
             return False
+
+    def _release(self):
+        try:
+            self.credits.release()
+        except Exception:
+            pass
 
     def close(self):
         for _ in range(2):
@@ -447,8 +417,6 @@ def run_stream(cfg, demo=False, log_every=5.0):
     last = time.perf_counter()
     last_log = last
     next_frame = last
-    last_full = 0.0
-    prev = None
     fails = 0
     rate_at_log = 0
     kb_at_log = 0.0
@@ -460,14 +428,16 @@ def run_stream(cfg, demo=False, log_every=5.0):
     # accumulated (the loop landed ~1 ms late per frame and sat at 57 fps)
     pace_err = 0.0
     last_gap = None
+    last_full = 0.0        # when the panel last got a whole frame
+    prev = None            # RGB565 the panel actually shows
+    buf = tmp = None       # scratch buffers for the per-frame conversion
+    stats = {}
     try:
         while not stop["v"]:
             now = time.perf_counter()
             if prev_top is not None:
                 last_gap = now - prev_top
             prev_top = now
-            dt = max(0.001, min(0.5, now - last))
-            last = now
             if sender is not None:
                 sender.pump()
             if sender is None or sender.dead():
@@ -484,7 +454,7 @@ def run_stream(cfg, demo=False, log_every=5.0):
                 else:
                     base = (0, 0)
                 state["connected"] = False
-                prev = None
+                prev = None             # the new handle's panel state is unknown
                 sender = _Sender(base)
                 if sender.error is not None:
                     print(f"[hubmon] cannot reopen device: {sender.error}")
@@ -496,84 +466,103 @@ def run_stream(cfg, demo=False, log_every=5.0):
                     state["hub"] = dict(sender.identity)
                 last_gap = None         # the reopen gap is not a pacing sample
                 continue
-            dash.apply_config(cfg)         # pick up live panel edits
-            if cfg.spectrum_device != spec.device:
-                spec.stop()               # the panel changed the capture device
-                spec = audio.Spectrum(cfg.spectrum_device, cfg.spectrum_tilt,
-                                      cfg.spectrum_smoothing)
-            # the analyser's two knobs are live values: retuning them costs a
-            # float compare, so the panel's sliders respond without a restart
-            spec.tune(cfg.spectrum_tilt, cfg.spectrum_smoothing)
-            want_spec = (cfg.mode == "spectrum")
-            if want_spec and not demo:
-                spec.start()
-            elif not want_spec:
-                spec.stop()
-            state["spec_state"] = spec.state
-            try:
-                stats = sensor.snapshot()
-                if want_spec and not demo:
-                    bands, peaks = spec.levels(dt)
-                    stats["spectrum_bands"] = bands
-                    stats["spectrum_peaks"] = peaks
-                stats["spec_state"] = spec.state
-                if want_spec and cfg.lyrics_enable and not demo:
-                    snap = watcher.snapshot()
-                    song = "%s|%s" % (snap["title"], snap["artist"])
-                    if song != track["song"]:          # new track: look up once
-                        track["song"] = song
-                        track["lines"] = provider_lyrics.lines_for(
-                            snap["title"], snap["artist"], snap["album"],
-                            snap["duration_s"], snap["song_id"])
-                    lst = lstate.update(cfg, snap, track["lines"], dt)
-                    stats["lyric_text"] = lst["text"]
-                    stats["lyric_prev"] = lst["prev"]
-                    stats["lyric_t"] = lst["t"]
-                    stats["lyric_effect"] = lst["effect"]
-                    stats["lyric_visible"] = lst["visible"]
-                    stats["lyric_dur"] = lst["dur"]
-                dash.update(stats)
-                img = dash.render(dt)
-                cur = dash.to_rgb565_be(img)
-
-                rects, nbytes = ((None, transport.FRAME_BYTES) if prev is None
-                                 else dirty_rects(prev, cur))
-                resync = (now - last_full) >= RESYNC_EVERY
-                whole = (not cfg.partial or prev is None or resync
-                         or nbytes > transport.FRAME_BYTES * FULL_THRESHOLD)
-                if whole:
-                    sent = sender.submit("frame", cur, transport.FRAME_BYTES, 0)
-                    if sent:
-                        last_full = now
-                else:
-                    arr = np.frombuffer(cur, np.uint8).reshape(H, W, 2)
-                    pkts = []
-                    moved = 0
-                    for k in range(0, len(rects), transport.BATCH_MAX):
-                        batch = rects[k:k + transport.BATCH_MAX]
-                        pkts.append((transport.batch_packet(batch, arr), len(batch)))
-                        moved += sum(w * h * 2 for (_, _, w, h) in batch)
-                    sent = sender.submit("batches", pkts, moved, len(rects))
-                # ``prev`` mirrors what the panel actually received. A frame the
-                # worker skipped never reached it, so the next diff has to be
-                # computed against the last delivered frame -- otherwise the
-                # pixels that changed only in the skipped frame are never sent
-                # and stay visible as stale digits or leftovers.
-                if sent:
-                    prev = cur
-                loops += 1
+            # Back-pressure. The worker hands the credit back the moment it
+            # lifts a frame off the queue, so this waits exactly as long as the
+            # link is busy: a frame built while the worker is still writing
+            # would only be thrown away, and drawing it was the whole CPU cost
+            # of an "unlimited" stream.
+            if not sender.ready():
                 state["out_fps"] = sender.fps
                 state["kb_s"] = sender.kb_s
-                state["patches"] = sender.patches
-                state["frames"] = sender.frames
-                state["dropped"] = sender.dropped
-                fails = 0
-            except Exception as e:
-                fails += 1
-                if fails in (1, 5):
-                    print(f"[hubmon] frame error ({e})")
-                time.sleep(0.2)
-                continue
+            else:
+                # time since the last frame actually produced, not since the
+                # last loop pass: skipped passes must not slow the animation
+                dt = max(0.001, min(0.5, now - last))
+                last = now
+                dash.apply_config(cfg)         # pick up live panel edits
+                if cfg.spectrum_device != spec.device:
+                    spec.stop()               # the panel changed the capture device
+                    spec = audio.Spectrum(cfg.spectrum_device, cfg.spectrum_tilt,
+                                          cfg.spectrum_smoothing)
+                # the analyser's two knobs are live values: retuning them costs a
+                # float compare, so the panel's sliders respond without a restart
+                spec.tune(cfg.spectrum_tilt, cfg.spectrum_smoothing)
+                want_spec = (cfg.mode == "spectrum")
+                if want_spec and not demo:
+                    spec.start()
+                elif not want_spec:
+                    spec.stop()
+                state["spec_state"] = spec.state
+                try:
+                    stats = sensor.snapshot()
+                    if want_spec and not demo:
+                        # one envelope step per drawn frame, with the real
+                        # elapsed time: stepping it on a separate clock left
+                        # the bars lagging behind the frame that drew them
+                        bands, peaks = spec.levels(dt)
+                        stats["spectrum_bands"] = bands
+                        stats["spectrum_peaks"] = peaks
+                    stats["spec_state"] = spec.state
+                    if want_spec and cfg.lyrics_enable and not demo:
+                        snap = watcher.snapshot()
+                        song = "%s|%s" % (snap["title"], snap["artist"])
+                        if song != track["song"]:          # new track: look up once
+                            track["song"] = song
+                            track["lines"] = provider_lyrics.lines_for(
+                                snap["title"], snap["artist"], snap["album"],
+                                snap["duration_s"], snap["song_id"])
+                        lst = lstate.update(cfg, snap, track["lines"], dt)
+                        stats["lyric_text"] = lst["text"]
+                        stats["lyric_prev"] = lst["prev"]
+                        stats["lyric_t"] = lst["t"]
+                        stats["lyric_effect"] = lst["effect"]
+                        stats["lyric_visible"] = lst["visible"]
+                        stats["lyric_dur"] = lst["dur"]
+                    dash.update(stats)
+                    img = dash.render(dt)
+                    # one conversion pass per frame with reused scratch buffers;
+                    # the worker only writes what comes out of here
+                    cur, buf, tmp = transport.to_rgb565_be(np.asarray(img), buf, tmp)
+
+                    rects, nbytes = ((None, transport.FRAME_BYTES) if prev is None
+                                     else transport.dirty_rects(prev, cur))
+                    resync = (now - last_full) >= transport.RESYNC_EVERY
+                    whole = (not cfg.partial or prev is None or resync
+                             or nbytes > transport.FRAME_BYTES * transport.FULL_THRESHOLD)
+                    if whole:
+                        sent = sender.submit("frame", cur, transport.FRAME_BYTES, 0)
+                        if sent:
+                            last_full = now
+                    else:
+                        arr565 = np.frombuffer(cur, np.uint8).reshape(H, W, 2)
+                        pkts = []
+                        moved = 0
+                        for k in range(0, len(rects), transport.BATCH_MAX):
+                            batch = rects[k:k + transport.BATCH_MAX]
+                            pkts.append((transport.batch_packet(batch, arr565), len(batch)))
+                            moved += sum(w * h * 2 for (_, _, w, h) in batch)
+                        sent = sender.submit("batches", pkts, moved, len(rects))
+                    # ``prev`` mirrors what the panel actually received. A frame
+                    # the worker skipped never reached it, so the next diff has
+                    # to be computed against the last delivered frame -- otherwise
+                    # the pixels that changed only in the skipped frame are never
+                    # sent and stay visible as stale digits or leftovers.
+                    if sent:
+                        prev = cur
+                    loops += 1
+                    state["out_fps"] = sender.fps
+                    state["kb_s"] = sender.kb_s
+                    state["patches"] = sender.patches
+                    state["frames"] = sender.frames
+                    state["dropped"] = sender.dropped
+                    fails = 0
+                except Exception as e:
+                    fails += 1
+                    if fails in (1, 5):
+                        print(f"[hubmon] frame error ({e})")
+                    sender._release()      # this frame will never be sent
+                    time.sleep(0.2)
+                    continue
 
             if now - last_log >= log_every and sender is not None:
                 el = now - last_log

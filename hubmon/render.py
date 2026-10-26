@@ -143,12 +143,22 @@ def _face_for(name):
     return _cjk(LYRIC_SIZE)
 
 
+_RGB = {}           # "#rrggbb" -> (r, g, b); the panel asks for the same few
+
+
 def hex_rgb(s, fallback):
+    got = _RGB.get(s)
+    if got is not None:
+        return got
     try:
-        s = s.lstrip("#")
-        return tuple(int(s[i:i + 2], 16) for i in (0, 2, 4))
+        t = s.lstrip("#")
+        got = tuple(int(t[i:i + 2], 16) for i in (0, 2, 4))
     except Exception:
-        return fallback
+        got = fallback
+    if len(_RGB) > 64:
+        _RGB.clear()
+    _RGB[s] = got
+    return got
 
 
 def lerp(a, b, t):
@@ -205,6 +215,9 @@ def core_label(cores, threads):
     return "—"
 
 
+_INK_MID = {}       # (font id, text, band) -> (font, draw origin)
+
+
 def ink_mid(font, text, top, bot):
     """Draw origin that centres ``text``'s ink box within the band top..bot.
 
@@ -213,8 +226,17 @@ def ink_mid(font, text, top, bot):
     the digits that the clock does not use, which is what pushed the readout
     onto the frame.
     """
+    key = (id(font), text, top, bot)
+    hit = _INK_MID.get(key)
+    if hit is not None and hit[0] is font:
+        return hit[1]
     b = font.getbbox(text or "0")
-    return top + (bot - top - max(1, b[3] - b[1])) / 2.0 - b[1]
+    y = top + (bot - top - max(1, b[3] - b[1])) / 2.0 - b[1]
+    # the font is kept in the entry too, so its id cannot be recycled underneath
+    if len(_INK_MID) > 256:
+        _INK_MID.clear()
+    _INK_MID[key] = (font, y)
+    return y
 
 
 class TextCache:
@@ -324,6 +346,7 @@ class RollText:
         # the dashboard hands over its tile cache; without one (standalone use)
         # the settled text falls back to a plain draw
         self.cache = None
+        self._w = None              # measured once per string, see width()
 
     def set(self, text):
         text = str(text)
@@ -335,6 +358,7 @@ class RollText:
             n = len(text)
             self.prev = self.text.rjust(n) if len(self.text) < n else self.text[-n:]
         self.text = text
+        self._w = None
         self.t = 0.0 if self.enabled else 1.0
 
     def step(self, dt):
@@ -342,7 +366,12 @@ class RollText:
             self.t = min(1.0, self.t + dt * self.speed)
 
     def width(self):
-        return self.font.getlength(self.text)
+        # the layout asks for this on every frame, but the string only changes
+        # at the refresh rate; measuring it per frame was a text-shaping call
+        w = self._w
+        if w is None:
+            w = self._w = self.font.getlength(self.text)
+        return w
 
     def _ink(self):
         """(ink_top, ink_bottom) of digits, relative to the draw origin.
@@ -460,6 +489,7 @@ class SegText:
         self.enabled = True
         self._mcache = {}           # (text, dim) -> rasterised tile (see _tile)
         self._lcache = {}           # text -> lit+ghost composite (see _lit)
+        self._w = None              # measured once per string, see width()
 
     def set(self, text):
         text = str(text)
@@ -471,6 +501,7 @@ class SegText:
             n = len(text)
             self.prev = self.text.rjust(n) if len(self.text) < n else self.text[-n:]
         self.text = text
+        self._w = None
         self.t = 0.0 if self.enabled else 1.0
 
     def step(self, dt):
@@ -514,7 +545,10 @@ class SegText:
         return sum(self._adv(c) for c in text)
 
     def width(self):
-        return self._width(self.text)
+        w = self._w
+        if w is None:
+            w = self._w = self._width(self.text)
+        return w
 
     def _mask(self, text, w, h, t, tw, th, pad):
         """Coverage mask for one string, with the tile origin at (pad, pad)."""
@@ -762,11 +796,21 @@ def spec_x(i):
     return int(SPEC_X0 + i * SPEC_PITCH)
 
 
+_LUTS = {}          # a -> the 256-entry alpha table it scales by
+
+
 def _alpha_lut(a):
     """Scale a layer's alpha by ``a``/255: the overlay's opacity, and during a
-    transition the share of it a line carries this frame."""
+    transition the share of it a line carries this frame.
+
+    Memoised because ``Image.point`` converts the table again internally (256
+    ``round`` calls) and the same few opacities are used for frame after frame.
+    """
     a = max(0, min(255, int(a)))
-    return [v * a // 255 for v in range(256)]
+    lut = _LUTS.get(a)
+    if lut is None:
+        lut = _LUTS[a] = [v * a // 255 for v in range(256)]
+    return lut
 
 
 def _shatter(txt, ci, bi, x, y):
@@ -893,6 +937,7 @@ class Dashboard:
         self._bar_tgt = {"cpu": 0.0, "gpu": 0.0}
         self._bar_acc = BAR_PERIOD
         self._static = None
+        self._work = None      # persistent frame buffer, see render()
         self._sig = None
         self._masks = {}
         self._tc = TextCache()
@@ -948,6 +993,7 @@ class Dashboard:
         self.lyric_visible = False
         self.lyric_dur = 0.22                # the line's reveal length, seconds
         self._lyr_cache = {}                 # (txt, face, colour, glow) -> cells
+        self._glyphs = {}     # (id(layer), alpha) -> opacity-scaled glyph layer
 
         self._layout()
         self.apply_config(self.cfg, force=True)
@@ -1221,6 +1267,7 @@ class Dashboard:
         # card captions sit above the liquid fill, so they cannot be baked into
         # the chrome itself; they are cached as a separate layer (see _labels)
         self._static = img
+        self._work = None         # the reusable frame buffer must follow the new base
         self._water_img = {}      # the pool patches were composited on the old base
         self._labels_img = None   # captions may follow the new palette/geometry
 
@@ -1588,9 +1635,27 @@ class Dashboard:
             a = int(base * u)
             if a <= 0:
                 continue
-            one = lay.copy()
-            one.putalpha(one.getchannel("A").point(_alpha_lut(a)))
-            _paste_overlay(img, one, px, py)
+            _paste_overlay(img, self._tinted_glyph(lay, a), px, py)
+
+    def _tinted_glyph(self, lay, a):
+        """A glyph layer carrying ``a``/255 opacity, cached per layer and alpha.
+
+        A settled line repeats the same composites every frame at a constant
+        opacity, and copying + ``point()``-scaling an RGBA layer per glyph per
+        frame was the single largest cost in a 300 fps frame. The layer itself
+        is kept in the entry as well, so its ``id`` cannot be recycled while the
+        entry is alive.
+        """
+        key = (id(lay), a)
+        hit = self._glyphs.get(key)
+        if hit is not None and hit[0] is lay:
+            return hit[1]
+        one = lay.copy()
+        one.putalpha(one.getchannel("A").point(_alpha_lut(a)))
+        if len(self._glyphs) > 400:
+            self._glyphs.clear()
+        self._glyphs[key] = (lay, one)
+        return one
 
     def _labels_layer(self):
         """The captions as one transparent layer, baked once.
@@ -1936,7 +2001,15 @@ class Dashboard:
         if self._static is None:
             self._build_static()
         self.step(dt)
-        img = self._static.copy()
+        # The frame is drawn into one buffer that is reused every time: at an
+        # uncapped frame rate a fresh 320x170 RGBA copy per frame was hundreds of
+        # allocations a second, and pasting the base into a warm buffer is a
+        # plain blit with no allocator or GC work.
+        img = self._work
+        if img is None or img.size != self._static.size:
+            img = self._work = self._static.copy()
+        else:
+            img.paste(self._static)
         c = self.cfg
         cpu_col = hex_rgb(c.accent_cpu, ACCENT_CYAN)
         gpu_col = hex_rgb(c.accent_gpu, ACCENT_VIOLET)
@@ -2095,11 +2168,3 @@ class Dashboard:
                       fit(spec or "—", self._f_spec, g.w - PAD * 2),
                       self._f_spec, TEXT_DIM, 1, TEXT_SHADOW)
 
-    # ------------------------------------------------------------------ util
-    def to_rgb565_be(self, img):
-        arr = np.asarray(img, dtype=np.uint16)
-        r = (arr[:, :, 0] >> 3) & 0x1F
-        g = (arr[:, :, 1] >> 2) & 0x3F
-        b = (arr[:, :, 2] >> 3) & 0x1F
-        v = (r << 11) | (g << 5) | b
-        return v.astype(">u2").tobytes()

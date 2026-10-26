@@ -28,7 +28,7 @@ _MIGRATIONS = {
 @dataclass
 class Config:
     # ---- streaming ---------------------------------------------------------
-    fps: float = 60.0            # 0 = as fast as the link allows
+    fps: float = 0.0             # 0 = uncapped: produce only as fast as the link
     partial: bool = True         # send only changed regions
     text_period: float = 1.5     # seconds between value refreshes
     fps_period: float = 0.5      # seconds between frame-rate refreshes

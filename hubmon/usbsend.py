@@ -5,12 +5,22 @@ so a sender *thread* loses that time between USB transfers and the stream tops
 out near 55 fps even though the link itself can do ~84 fps. Owning the device in
 a separate process removes the contention entirely.
 
+The frame is converted, diffed and packed on the render side: that work is pure
+CPU and the sender must not serialize it in front of the USB write, which is
+what put a full RGB565 conversion between every two transfers and halved the
+stream when it was moved here.
+
 Protocol with the parent (``multiprocessing.Queue`` pairs):
 
     tasks  : ("open",) | ("frame", bytes, moved, patches)
              | ("batches", [(packet, rects)], moved, patches) | None
     events : ("open", identity, ack) | ("stats", frames, bytes, patches, fps,
-             kb_s) | ("error", text)
+             kb_s, busy_ms, empties) | ("error", text)
+
+``credits`` is a one-token semaphore: the parent takes it before building a
+frame and this process gives it back the moment it lifts a frame off the queue,
+so the render loop follows the link's pace instead of rendering frames the
+one-deep queue would only drop.
 """
 from __future__ import annotations
 
@@ -19,9 +29,9 @@ import time
 import traceback
 
 
-def run(tasks, events):
+def run(tasks, events, credits=None):
     try:
-        _run(tasks, events)
+        _run(tasks, events, credits)
     except BaseException:
         try:
             events.put(("fatal", traceback.format_exc()))
@@ -30,7 +40,7 @@ def run(tasks, events):
         raise
 
 
-def _run(tasks, events):
+def _run(tasks, events, credits=None):
     from . import transport
 
     screen = None
@@ -101,6 +111,13 @@ def _run(tasks, events):
                 break
 
             _, payload, moved, npatches = item
+            # Hand the credit back as soon as this frame is off the queue, not
+            # when it has been sent: the renderer then builds the next frame
+            # while this one is on the wire. Releasing at the end instead made
+            # the two phases take turns, which is what kept the stream at the
+            # sum of both instead of the slower one.
+            if credits is not None:
+                credits.release()
             started = time.perf_counter()
             try:
                 if kind == "frame":

@@ -122,6 +122,7 @@ class Spectrum:
         self.smoothing = min(1.0, max(0.0, float(smoothing)))
         self._tilt = tilt_db(self.tilt_db_per_oct)
         self._latest = None            # newest block, written by the capture thread
+        self._analysed = None          # last block that went through the FFT
         self._target = [0.0] * BANDS
         self._bands = [0.0] * BANDS
         self._hold = [0.0] * BANDS
@@ -206,8 +207,13 @@ class Spectrum:
     def levels(self, dt: float):
         """(bands, peaks) for the next frame, stepping the envelope by ``dt``."""
         dt = max(1e-4, float(dt))
-        if self._latest is not None:
-            self._target = self._analyse(self._latest)
+        block = self._latest
+        if block is not None and block is not self._analysed:
+            # The capture thread publishes about 23 blocks a second while the
+            # panel draws several hundred frames, so analysing the block that
+            # is already on hand again is the same answer for another FFT.
+            self._target = self._analyse(block)
+            self._analysed = block
         attack = ATTACK_BASE + ATTACK_RANGE * self.smoothing
         release = RELEASE_BASE + RELEASE_RANGE * self.smoothing
         up = 1.0 - math.exp(-dt / attack)

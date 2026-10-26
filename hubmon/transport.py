@@ -32,6 +32,7 @@ import os
 import struct
 import time
 
+import numpy as np
 import usb.core
 import usb.backend.libusb1
 import usb.util
@@ -46,8 +47,85 @@ FRAME_BYTES = W * H * 2
 # the panel rejects a batch with more than six rectangles
 BATCH_MAX = 6
 
+# Dirty-region tile size. 1x5 tiles cut a typical frame from 21 KB to 7 KB; a
+# batch carries six of them per command, so the finer grid stays affordable.
+TILE_W, TILE_H = 1, 5
+# If nearly the whole screen changed, a full frame is simpler: with 1x5 tiles a
+# full-screen patch set costs about the same as a full frame (108 KB, ~140 ms),
+# so switching earlier only adds latency spikes; medium changes stay patches.
+FULL_THRESHOLD = 0.95
+# Occasional full frame so the panel cannot drift out of sync.
+RESYNC_EVERY = 120.0
+
 # Override the libusb DLL with HUBMON_LIBUSB if the bundled one is not usable.
 LIBUSB_ENV = "HUBMON_LIBUSB"
+
+
+def dirty_rects(prev, cur):
+    """Rectangles covering every tile that differs between two RGB565 buffers.
+
+    Row runs are merged vertically whenever consecutive rows share the exact
+    same x span, which cuts the command count without adding a byte.
+    """
+    # compare as 16-bit words: one bool array instead of two per channel, and
+    # no byte-level reduction pass (byte order is irrelevant to equality)
+    a = np.frombuffer(prev, np.uint16).reshape(H, W)
+    b = np.frombuffer(cur, np.uint16).reshape(H, W)
+    tiles = (a != b).reshape(H // TILE_H, TILE_H,
+                             W // TILE_W, TILE_W).any(axis=(1, 3))
+    # Tile-row runs, found from the edges of each row instead of scanning every
+    # tile in Python: a zero-padded row turns each run into a +1/-1 pair, and
+    # the transitions come out of one diff. Rows never interleave, so the k-th
+    # start pairs with the k-th end.
+    rows, cols = tiles.shape
+    pad = np.zeros((rows, cols + 2), np.int8)
+    pad[:, 1:-1] = tiles
+    edges = np.diff(pad, axis=1)
+    starts = np.argwhere(edges == 1)
+    ends = np.argwhere(edges == -1)
+    runs = [(int(s[1]) * TILE_W, int(s[0]) * TILE_H,
+             int(e[1] - s[1]) * TILE_W, TILE_H)
+            for s, e in zip(starts, ends)]
+    spans = {}
+    for (x, y, w, h) in runs:
+        spans.setdefault((x, w), []).append((y, h))
+    rects = []
+    for (x, w), rows_ in spans.items():
+        rows_.sort()
+        y0, h = rows_[0]
+        for y, hh in rows_[1:]:
+            if y == y0 + h:
+                h += hh
+            else:
+                rects.append((x, y0, w, h))
+                y0, h = y, hh
+        rects.append((x, y0, w, h))
+    total = sum(w * h * 2 for (_, _, w, h) in rects)
+    return rects, total
+
+
+def to_rgb565_be(arr, buf=None, tmp=None):
+    """RGBA pixels as big-endian RGB565 bytes, with reusable scratch buffers.
+
+    The panel wants rrrrrggg gggbbbbb, so the two bytes are built separately:
+    writing the high byte first avoids a 16-bit assembly pass plus a byte swap,
+    which measured ~30% slower. Returns ``(bytes, buf, tmp)`` so the caller can
+    hand the buffers back next frame.
+    """
+    h, w = arr.shape[:2]
+    if buf is None or buf.shape != (h, w, 2):
+        buf = np.empty((h, w, 2), np.uint8)
+        tmp = np.empty((h, w), np.uint8)
+    t = tmp
+    hi, lo = buf[:, :, 0], buf[:, :, 1]
+    np.bitwise_and(arr[:, :, 0], 0xF8, out=hi)          # rrrrr<<3
+    np.right_shift(arr[:, :, 1], 5, out=t)
+    np.bitwise_or(hi, t, out=hi)                        # ... | ggg
+    np.bitwise_and(arr[:, :, 1], 0x1C, out=t)
+    np.left_shift(t, 3, out=t)                          # ggg<<3
+    np.right_shift(arr[:, :, 2], 3, out=lo)             # bbbbb
+    np.bitwise_or(lo, t, out=lo)
+    return buf.tobytes(), buf, tmp
 
 
 def _backend():
