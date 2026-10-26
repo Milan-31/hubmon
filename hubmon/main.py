@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import argparse
 import math
+import multiprocessing
 import os
+import queue
 import signal
 import sys
 import time
@@ -20,41 +22,61 @@ import time
 import numpy as np
 import psutil
 
-from . import audio, config, lyrics, transport, webui
+from . import audio, config, lyrics, sensorproc, transport, usbsend, webui
 from .render import Dashboard, H, W, core_label
-from .sensors import Sensors
 
 VENDOR_NAMES = ("佳点V1PRO控制工具", "usb_send_gif")
 
-# dirty-region tile size; patches are only sent where the image actually changed
-TILE_W, TILE_H = 16, 10
-# if too much of the screen changed, a full frame is cheaper
-FULL_THRESHOLD = 0.45
+# dirty-region tile size. 1x5 tiles cut a typical frame from 21 KB to 7 KB; a
+# batch carries six of them per command, so the finer grid stays affordable and
+# the USB side measured 11.9 ms/frame for a whole frame.
+TILE_W, TILE_H = 1, 5
+# if nearly the whole screen changed, a full frame is simpler. With 1x5 tiles a
+# full-screen patch set costs about the same as a full frame (108 KB, ~150 ms),
+# so switching earlier only adds latency spikes; medium changes stay as patches.
+FULL_THRESHOLD = 0.95
 # occasional full frame to guarantee the panel cannot drift out of sync
 RESYNC_EVERY = 120.0
 
 
 def dirty_rects(prev, cur):
-    """Rectangles covering every tile that differs between two RGB565 buffers."""
+    """Rectangles covering every tile that differs between two RGB565 buffers.
+
+    Row runs are merged vertically whenever consecutive rows share the exact
+    same x span, which cuts the command count without adding a byte.
+    """
     a = np.frombuffer(prev, np.uint8).reshape(H, W, 2)
     b = np.frombuffer(cur, np.uint8).reshape(H, W, 2)
     tiles = (a != b).any(axis=2).reshape(H // TILE_H, TILE_H,
                                         W // TILE_W, TILE_W).any(axis=(1, 3))
+    # Tile-row runs, found from the edges of each row instead of scanning every
+    # tile in Python: a zero-padded row turns each run into a +1/-1 pair, and
+    # the transitions come out of one diff. Rows never interleave, so the k-th
+    # start pairs with the k-th end.
+    rows, cols = tiles.shape
+    pad = np.zeros((rows, cols + 2), np.int8)
+    pad[:, 1:-1] = tiles
+    edges = np.diff(pad, axis=1)
+    starts = np.argwhere(edges == 1)
+    ends = np.argwhere(edges == -1)
+    runs = [(int(s[1]) * TILE_W, int(s[0]) * TILE_H,
+             int(e[1] - s[1]) * TILE_W, TILE_H)
+            for s, e in zip(starts, ends)]
+    spans = {}
+    for (x, y, w, h) in runs:
+        spans.setdefault((x, w), []).append((y, h))
     rects = []
-    total = 0
-    for ty in range(tiles.shape[0]):
-        row = tiles[ty]
-        tx = 0
-        while tx < row.shape[0]:
-            if not row[tx]:
-                tx += 1
-                continue
-            start = tx
-            while tx < row.shape[0] and row[tx]:
-                tx += 1
-            x, w, y = start * TILE_W, (tx - start) * TILE_W, ty * TILE_H
-            rects.append((x, y, w, TILE_H))
-            total += w * TILE_H * 2
+    for (x, w), rows in spans.items():
+        rows.sort()
+        y0, h = rows[0]
+        for y, hh in rows[1:]:
+            if y == y0 + h:
+                h += hh
+            else:
+                rects.append((x, y0, w, h))
+                y0, h = y, hh
+        rects.append((x, y0, w, h))
+    total = sum(w * h * 2 for (_, _, w, h) in rects)
     return rects, total
 
 
@@ -150,8 +172,234 @@ def stats_provider(dash, state):
     return provider
 
 
+def _err_text(e):
+    """Readable text for an exception that may carry no message at all.
+
+    ``multiprocessing`` reports a broken pipe back to the parent as a bare
+    ``EOFError`` whose ``str`` is empty; storing that would make the state
+    tests see a failed link as a healthy one (empty is falsy).
+    """
+    return str(e) or type(e).__name__
+
+
+class _Sampler:
+    """Owns the sensor sampler in a separate process (see ``hubmon.sensorproc``).
+
+    The sampler's ``nvidia-smi`` spawns and pipe readers cost the render loop
+    a slice of GIL every half second; isolated here they cannot disturb the
+    frame cadence.
+    """
+
+    def __init__(self, presentmon_path=""):
+        self._path = presentmon_path
+        self.data = {}
+        self.error = None
+        self._spawn()
+
+    def _spawn(self):
+        ctx = multiprocessing.get_context("spawn")
+        self.q = ctx.Queue(maxsize=4)
+        self.halt = ctx.Event()
+        self.proc = ctx.Process(target=sensorproc.run,
+                                args=(self.q, self.halt, self._path),
+                                daemon=True)
+        self.proc.start()
+        self._last = time.perf_counter()
+
+    def snapshot(self):
+        """Latest sample; the loop never waits on the sampler."""
+        try:
+            while True:
+                kind, payload = self.q.get_nowait()
+                if kind == "stats":
+                    self.data = payload
+                    self._last = time.perf_counter()
+                else:
+                    self.error = payload
+        except queue.Empty:
+            pass
+        if not self.proc.is_alive() and time.perf_counter() - self._last > 2.0:
+            # a dead sampler would freeze every readout, so take a fresh one
+            self.error = self.error or "sampler stopped"
+            self._spawn()
+        return self.data
+
+    def stop(self):
+        self.halt.set()
+        self.proc.join(timeout=3.0)
+        if self.proc.is_alive():
+            self.proc.terminate()
+            self.proc.join(timeout=1.0)
+
+
+class _Sender:
+    """Owns the USB transport in a separate process (see ``hubmon.usbsend``).
+
+    A sender thread shared the GIL with PIL and stalled for the renderer's
+    several-millisecond draw calls, capping the stream near 55 fps. The child
+    process has its own GIL, so the link runs at its own ~12 ms/frame while the
+    render loop keeps a steady 60.
+    """
+
+    def __init__(self, base=(0, 0)):
+        ctx = multiprocessing.get_context("spawn")
+        # one buffered frame absorbs a single slow panel frame without pushing
+        # commands at the device back-to-back, which makes its writes stall
+        self.tasks = ctx.Queue(maxsize=1)
+        self.events = ctx.Queue()
+        self.proc = ctx.Process(target=usbsend.run,
+                                args=(self.tasks, self.events), daemon=True)
+        self.proc.start()
+        self._base_frames, self._base_bytes = base
+        self.error = None
+        self.identity = {}
+        self.frames = base[0]
+        self.patches = 0
+        self.bytes = base[1]
+        self.dropped = 0
+        self.fps = 0.0
+        self.kb_s = 0.0
+        self.busy_ms = 0.0
+        self.empties = 0
+        self.ack = b""
+        # the worker publishes stats every 0.5 s even when idle, so the arrival
+        # of any message proves the process is alive; silence is the real fault
+        # signal (``Process.exitcode`` can briefly read stale/misleading values
+        # and used to trigger spurious reconnects mid-stream)
+        self._last_msg = time.perf_counter()
+        self._open()
+
+    def dead(self):
+        """True when the worker has failed or stopped answering."""
+        # ``is_alive`` is the reliable signal that the process is gone; the
+        # message timer only catches a worker that is still running but wedged,
+        # and it has to be generous so a busy machine cannot fake a failure
+        return (self.error is not None
+                or not self.proc.is_alive()
+                or time.perf_counter() - self._last_msg > 8.0)
+
+    def _open(self):
+        try:
+            self.tasks.put_nowait(("open",))
+        except Exception as e:
+            self.error = _err_text(e)
+            return
+        reply = self.pump(timeout=15.0)
+        if reply is None:
+            self.error = "sender process did not answer"
+        elif reply[0] == "error":
+            # never leave this empty: an empty string is falsy, so the caller
+            # used to treat a failed open as a healthy link and immediately
+            # spawn another worker that failed the same way
+            self.error = reply[1] or "device open failed"
+        else:
+            self.ack = reply[1]
+
+    def pump(self, timeout=0.0):
+        """Handle worker messages; return an open/error reply when one is due."""
+        end = time.perf_counter() + timeout
+        while True:
+            if timeout:
+                remain = end - time.perf_counter()
+                if remain <= 0:
+                    return None
+                try:
+                    msg = self.events.get(timeout=remain)
+                except queue.Empty:
+                    return None
+            else:
+                try:
+                    msg = self.events.get_nowait()
+                except queue.Empty:
+                    return None
+            self._last_msg = time.perf_counter()
+            if msg[0] == "stats":
+                (_, f, b, self.patches, self.fps, self.kb_s,
+                 self.busy_ms, self.empties) = msg
+                self.frames = self._base_frames + f
+                self.bytes = self._base_bytes + b
+            elif msg[0] == "open":
+                self.identity = msg[1]
+                return ("open", msg[2])
+            elif msg[0] == "error":
+                self.error = msg[1] or "usb worker failed"
+                return ("error", self.error)
+            elif msg[0] == "fatal":
+                self.error = msg[1].strip().splitlines()[-1]
+                return ("error", self.error)
+
+    def submit(self, kind, payload, moved, patches):
+        item = (kind, payload, moved, patches)
+        try:
+            self.tasks.put_nowait(item)
+            return True
+        except queue.Full:
+            # The worker is still busy with an earlier frame. Leave that one
+            # queued: it is the newest frame the device will actually receive,
+            # and the caller only advances its "what the panel shows" buffer
+            # when a frame is accepted. Evicting it to squeeze this frame in
+            # used to make the caller diff against a frame the panel never got,
+            # so digits and animations that changed in the skipped frame stayed
+            # on screen as leftovers.
+            self.dropped += 1
+            return False
+        except Exception as e:
+            self.error = _err_text(e)
+            return False
+
+    def close(self):
+        for _ in range(2):
+            try:
+                self.tasks.put_nowait(None)
+                break
+            except queue.Full:
+                try:
+                    self.tasks.get_nowait()
+                except queue.Empty:
+                    pass
+            except Exception:
+                break
+        self.proc.join(timeout=2.0)
+        if self.proc.is_alive():
+            self.proc.terminate()
+            self.proc.join(timeout=1.0)
+
+
 def run_stream(cfg, demo=False, log_every=5.0):
-    sensor = Demo() if demo else Sensors(presentmon_path=cfg.presentmon_path)
+    # The sampler, the lyric watcher and the panel server are all threads in
+    # this process. With the default 5 ms switch interval one of them can hold
+    # the GIL right when the frame deadline comes due, which showed up as a
+    # steady ~1 ms of lateness and a stream stuck in the high 50s. A shorter
+    # slice keeps the handoff inside the frame budget.
+    sys.setswitchinterval(0.0005)
+    # Windows coalesces timers for background apps, so a 4 ms sleep can come
+    # back after 15 ms -- exactly the kind of hitch that drops a 60 fps stream
+    # into the 50s. Ask for 1 ms timer resolution while we stream.
+    winmm = None
+    try:
+        import ctypes
+        winmm = ctypes.WinDLL("winmm")
+        winmm.timeBeginPeriod(1)
+    except Exception:
+        winmm = None
+    # A busy desktop can deschedule the render loop for a whole timeslice, which
+    # showed up as a handful of 20 ms frames every second. The stream is a
+    # realtime-ish task, so ask Windows for a higher class and take the frame
+    # budget back for the ~10 ms the loop is actually awake per frame.
+    try:
+        psutil.Process().nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+    except Exception:
+        pass
+    # Cyclic garbage left over from start-up would otherwise be rescanned by the
+    # full collections, whose pauses showed up as the occasional 30 ms frame;
+    # freezing the already-live objects keeps those collections away from them.
+    try:
+        import gc
+        gc.freeze()
+        gc.set_threshold(4000, 25, 25)
+    except Exception:
+        pass
+    sensor = Demo() if demo else _Sampler(cfg.presentmon_path)
     dash = Dashboard(cfg)
 
     state = {"connected": False, "out_fps": 0.0, "kb_s": 0.0,
@@ -159,8 +407,6 @@ def run_stream(cfg, demo=False, log_every=5.0):
 
     provider = stats_provider(dash, state)
 
-    if not demo:
-        sensor.start()
     spec = audio.Spectrum(cfg.spectrum_device, cfg.spectrum_tilt, cfg.spectrum_smoothing)
     watcher = lyrics.MediaWatcher()
     track = {"song": "", "lines": []}      # fetch once per track, not per frame
@@ -168,25 +414,17 @@ def run_stream(cfg, demo=False, log_every=5.0):
     lstate = lyrics.LyricState()
     if not demo:
         watcher.start()
-    screen = transport.LiveScreen()
 
-    try:
-        screen.open()
-        ack = screen.ping()
-        print(f"[hubmon] device open, heartbeat={ack!r}")
-    except Exception as e:
+    sender = _Sender()
+    if sender.error is not None:
         if not demo:
             sensor.stop()
-        print(f"[hubmon] cannot open device: {e}")
+        print(f"[hubmon] cannot open device: {sender.error}")
         print("[hubmon] make sure the hub is plugged in and the vendor tool is closed")
         return 2
-
-    def _mark_connected():
-        """Note that the panel is up, along with what the panel calls itself."""
-        state["connected"] = True
-        state["hub"] = dict(screen.identity)
-
-    _mark_connected()
+    print(f"[hubmon] device open, heartbeat={sender.ack!r}")
+    state["connected"] = True
+    state["hub"] = dict(sender.identity)
 
     stop = {"v": False}
 
@@ -208,19 +446,56 @@ def run_stream(cfg, demo=False, log_every=5.0):
 
     last = time.perf_counter()
     last_log = last
+    next_frame = last
     last_full = 0.0
     prev = None
-    sent = 0
-    patches = 0
     fails = 0
-    sent_at_log = 0
+    rate_at_log = 0
     kb_at_log = 0.0
-    bytes_at_log = 0.0
+    loops = 0
+    loops_at_log = 0
+    prev_top = None
+    # the deadline is trimmed by the measured lag between wake-up and the
+    # requested cadence, so sleep/handoff overhead is cancelled rather than
+    # accumulated (the loop landed ~1 ms late per frame and sat at 57 fps)
+    pace_err = 0.0
+    last_gap = None
     try:
         while not stop["v"]:
             now = time.perf_counter()
+            if prev_top is not None:
+                last_gap = now - prev_top
+            prev_top = now
             dt = max(0.001, min(0.5, now - last))
             last = now
+            if sender is not None:
+                sender.pump()
+            if sender is None or sender.dead():
+                if sender is not None:
+                    base = (sender.frames, sender.bytes)
+                    if sender.error:
+                        print(f"[hubmon] usb error ({sender.error}); reconnecting ...")
+                    else:
+                        print(f"[hubmon] sender silent (pid={sender.proc.pid}, "
+                              f"alive={sender.proc.is_alive()}, code="
+                              f"{sender.proc.exitcode}); reconnecting ...")
+                    sender.close()
+                    sender = None
+                else:
+                    base = (0, 0)
+                state["connected"] = False
+                prev = None
+                sender = _Sender(base)
+                if sender.error is not None:
+                    print(f"[hubmon] cannot reopen device: {sender.error}")
+                    sender.close()
+                    sender = None
+                    time.sleep(1.5)
+                else:
+                    state["connected"] = True
+                    state["hub"] = dict(sender.identity)
+                last_gap = None         # the reopen gap is not a pacing sample
+                continue
             dash.apply_config(cfg)         # pick up live panel edits
             if cfg.spectrum_device != spec.device:
                 spec.stop()               # the panel changed the capture device
@@ -267,77 +542,99 @@ def run_stream(cfg, demo=False, log_every=5.0):
                 whole = (not cfg.partial or prev is None or resync
                          or nbytes > transport.FRAME_BYTES * FULL_THRESHOLD)
                 if whole:
-                    screen.send_frame(cur)
-                    last_full = now
-                    patches = 0
+                    sent = sender.submit("frame", cur, transport.FRAME_BYTES, 0)
+                    if sent:
+                        last_full = now
                 else:
                     arr = np.frombuffer(cur, np.uint8).reshape(H, W, 2)
-                    for (x, y, w, h) in rects:
-                        screen.send_region(x, y, w, h,
-                                           arr[y:y + h, x:x + w].tobytes())
-                        patches += 1
-                moved = transport.FRAME_BYTES if whole else nbytes
-                kb_at_log += moved / 1024
-                inst_fps = 1.0 / dt
-                state["out_fps"] = inst_fps if not sent else (
-                    state["out_fps"] * 0.8 + inst_fps * 0.2)
-                state["kb_s"] = state["kb_s"] * 0.8 + (moved / 1024 / dt) * 0.2
-                state["patches"] = patches
-                state["frames"] = sent + 1
-                prev = cur
-                sent += 1
+                    pkts = []
+                    moved = 0
+                    for k in range(0, len(rects), transport.BATCH_MAX):
+                        batch = rects[k:k + transport.BATCH_MAX]
+                        pkts.append((transport.batch_packet(batch, arr), len(batch)))
+                        moved += sum(w * h * 2 for (_, _, w, h) in batch)
+                    sent = sender.submit("batches", pkts, moved, len(rects))
+                # ``prev`` mirrors what the panel actually received. A frame the
+                # worker skipped never reached it, so the next diff has to be
+                # computed against the last delivered frame -- otherwise the
+                # pixels that changed only in the skipped frame are never sent
+                # and stay visible as stale digits or leftovers.
+                if sent:
+                    prev = cur
+                loops += 1
+                state["out_fps"] = sender.fps
+                state["kb_s"] = sender.kb_s
+                state["patches"] = sender.patches
+                state["frames"] = sender.frames
+                state["dropped"] = sender.dropped
                 fails = 0
-            except transport.DeviceNotFound:
-                prev = None
-                state["connected"] = False
-                if screen.ensure_connected():
-                    _mark_connected()
-                    continue
-                time.sleep(1.0)
-                continue
             except Exception as e:
                 fails += 1
-                prev = None
-                state["connected"] = False
-                screen.close()
                 if fails in (1, 5):
-                    print(f"[hubmon] usb error ({e}); reconnecting ...")
-                if screen.ensure_connected(retries=1):
-                    _mark_connected()
-                    continue
-                time.sleep(1.5)
+                    print(f"[hubmon] frame error ({e})")
+                time.sleep(0.2)
                 continue
 
-            if now - last_log >= log_every:
+            if now - last_log >= log_every and sender is not None:
                 el = now - last_log
-                rate = (sent - sent_at_log) / el
-                sent_at_log = sent
-                kb = (kb_at_log - bytes_at_log) / el
-                bytes_at_log = kb_at_log
+                rate = (sender.frames - rate_at_log) / el
+                rate_at_log = sender.frames
+                kb = (sender.bytes / 1024 - kb_at_log) / el
+                kb_at_log = sender.bytes / 1024
+                loop_rate = (loops - loops_at_log) / el
+                loops_at_log = loops
                 print(f"[hubmon] {rate:5.1f} fps  {kb:6.1f} KiB/s  "
+                      f"render={loop_rate:4.1f}  drop={sender.dropped}  "
+                      f"link={sender.busy_ms:4.1f}ms  "
                       f"cpu={dash.v.cpu:5.1f}%  gpu={dash.v.gpu:5.1f}%  "
                       f"mem={dash.v.mem:4.1f}%  pwr={dash.v.power:.0f}W  "
-                      f"patches={patches}  frames={sent}", flush=True)
+                      f"patches={sender.patches}  frames={sender.frames}",
+                      flush=True)
                 last_log = now
 
             fps = cfg.fps
             if fps and fps > 0:
-                slack = 1.0 / fps - (time.perf_counter() - now)
-                if slack > 0:
-                    time.sleep(slack)
+                period = 1.0 / fps
+                # trim the deadline by the measured cadence error: waking from a
+                # Windows sleep costs about a millisecond, and without the trim
+                # that error is paid on every frame
+                next_frame += max(period * 0.85, period - pace_err)
+                slack = next_frame - time.perf_counter()
+                # Sleep for the bulk of a long gap, but never within 12 ms of
+                # the deadline: a coalesced timer can return 10-15 ms late, and
+                # that lands as a visible hitch in the stream.
+                if slack > 0.012:
+                    time.sleep(slack - 0.010)
+                while time.perf_counter() < next_frame:
+                    pass
+                after = time.perf_counter()
+                # trim on the measured frame-to-frame cadence, which is what the
+                # stream actually delivers, rather than on the timer alone
+                if last_gap is not None:
+                    pace_err += 0.03 * (last_gap - period - pace_err)
+                    pace_err = max(-0.0025, min(0.0025, pace_err))
+                if after - next_frame > period:
+                    next_frame = after
     finally:
+        stop["v"] = True
+        if winmm is not None:
+            try:
+                winmm.timeEndPeriod(1)
+            except Exception:
+                pass
+        if sender is not None:
+            sender.close()
         if not demo:
             sensor.stop()
         spec.stop()
         watcher.stop()
-        screen.close()
         webui.stop(panel)
-        print(f"[hubmon] stopped after {sent} frames, "
-              f"{screen.regions_sent} patches")
+        print(f"[hubmon] stopped after {sender.frames if sender else 0} frames")
     return 0
 
 
 def main(argv=None):
+    multiprocessing.freeze_support()
     ap = argparse.ArgumentParser(prog="hubmon")
     ap.add_argument("--fps", type=float, default=None,
                     help="override the frame-rate cap (0 = uncapped)")

@@ -302,7 +302,7 @@ SCHEMA = [
         "sections": [
             {"caption": "推流", "rows": [
                 {"key": "fps", "label": "帧率上限", "type": "num",
-                 "min": 0, "max": 120, "step": 1, "unit": "fps"},
+                 "min": 0, "max": 240, "step": 1, "unit": "fps"},
                 {"key": "partial", "label": "局部更新", "type": "bool"},
                 {"key": "text_period", "label": "数值刷新间隔", "type": "num",
                  "min": 0.1, "max": 10, "step": 0.1, "unit": "s"},

@@ -4,11 +4,25 @@ Protocol (reverse engineered): bulk OUT 0x01, ACK on bulk IN 0x81.
 
     A5 5A 0B | u32 payload_len | flags | payload
 
-``flags & 0x0F`` selects the mode: 0 = full frame, 1 = region patch (the device
-does not answer those). For a region patch the payload is an 8-byte rectangle
-(u16 x, y, w, h, little-endian) followed by ``w * h * 2`` RGB565 big-endian
-pixels, and ``payload_len`` is the *pixel* byte count. Patches are composited
-onto whatever the panel already shows, so only changed areas need to be sent.
+``flags & 0x0F`` selects the mode: 0 = full frame, 1 = region patch. For a region
+patch the payload is an 8-byte rectangle (u16 x, y, w, h, little-endian) followed
+by ``w * h * 2`` RGB565 big-endian pixels, and ``payload_len`` is the *pixel*
+byte count. Patches are composited onto whatever the panel already shows, so only
+changed areas need to be sent.
+
+Every command queues one text reply on the IN endpoint (``LIVE,ok`` or
+``LIVE,err,...``). Those replies must be read back: the firmware blocks its next
+transfer once the queue is full, which showed up as a 20 ms stall per patch and
+about 2 fps. Reading one ACK after each patch keeps the queue empty and measured
+5x faster on the same frame sequence.
+
+Mode 2 packs up to six rectangles into one command with a single ACK:
+
+    A5 5A 0B | u32 total_pixel_bytes | 02 | u8 count | count*(u16 x,y,w,h)
+    | pixels concatenated
+
+That removes the per-rectangle command overhead, which is what makes fine-grained
+dirty tiles (2x5) affordable and the stream reach 60 fps.
 
 Full frames are pushed in 16 KiB chunks; that chunk size measured fastest.
 """
@@ -29,6 +43,8 @@ EP_IN = 0x81
 CHUNK = 16384
 W, H = 320, 170
 FRAME_BYTES = W * H * 2
+# the panel rejects a batch with more than six rectangles
+BATCH_MAX = 6
 
 # Override the libusb DLL with HUBMON_LIBUSB if the bundled one is not usable.
 LIBUSB_ENV = "HUBMON_LIBUSB"
@@ -92,6 +108,15 @@ def read_identity(dev):
     return out
 
 
+def batch_packet(rects, arr):
+    """Build the mode-2 command for ``rects`` from an ``(H, W, 2)`` frame."""
+    pix = b"".join(arr[y:y + h, x:x + w].tobytes() for (x, y, w, h) in rects)
+    body = (bytes((len(rects),))
+            + b"".join(struct.pack("<4H", *r) for r in rects)
+            + pix)
+    return bytes((0xA5, 0x5A, 0x0B)) + struct.pack("<I", len(pix)) + bytes((0x02,)) + body
+
+
 class LiveScreen:
     def __init__(self, ack_timeout_ms=250):
         self._dev = None
@@ -115,6 +140,9 @@ class LiveScreen:
             pass
         self._dev = dev
         self.identity = read_identity(dev)
+        # a previous session (or the vendor tool) may have left replies queued;
+        # starting with a full IN queue caps every later write at ~20 ms
+        self._drain_pending()
 
     def close(self):
         if self._dev is not None:
@@ -138,11 +166,17 @@ class LiveScreen:
         for off in range(0, len(pkt), CHUNK):
             dev.write(EP_OUT, pkt[off:off + CHUNK], timeout=4000)
         self.frames_sent += 1
-        self._drain_ack()
+        ack = self._read_ack()        # full frames take ~90 ms to acknowledge
+        self._drain_pending()
+        return ack
 
     def send_region(self, x, y, w, h, rgb565: bytes):
-        """Composite a rectangle onto the panel. The device sends no reply, so
-        this is a pure OUT transfer -- far cheaper than a full frame."""
+        """Composite a rectangle onto the panel and consume its ACK.
+
+        The panel answers every patch with ``LIVE,ok``. Leaving those replies
+        unread fills the IN queue, after which each write stalls for ~20 ms, so
+        the ACK is read eagerly rather than once per frame.
+        """
         if len(rgb565) != w * h * 2:
             raise ValueError(f"region needs {w * h * 2} bytes, got {len(rgb565)}")
         hdr = (bytes((0xA5, 0x5A, 0x0B)) + struct.pack("<I", len(rgb565))
@@ -152,17 +186,55 @@ class LiveScreen:
         for off in range(0, len(pkt), CHUNK):
             dev.write(EP_OUT, pkt[off:off + CHUNK], timeout=4000)
         self.regions_sent += 1
+        return self._read_ack(timeout_ms=120)
 
-    def _drain_ack(self):
+    def write_packet(self, pkt, ack_timeout=30):
+        """Send one prepared LIVE command and consume its ACK."""
+        dev = self._dev
+        for off in range(0, len(pkt), CHUNK):
+            dev.write(EP_OUT, pkt[off:off + CHUNK], timeout=4000)
+        return self._read_ack(timeout_ms=ack_timeout)
+
+    def send_batch(self, rects, arr):
+        """Composite up to ``BATCH_MAX`` rectangles in one command and one ACK.
+
+        ``arr`` is the frame as ``(H, W, 2)`` uint8; only the listed rectangles
+        are copied out, so this stays cheap even at 2-pixel tile widths.
+        """
+        if not rects:
+            return b""
+        self.regions_sent += len(rects)
+        return self.write_packet(batch_packet(rects, arr))
+
+    def _drain_pending(self, max_reads=32):
+        """Read every queued reply, then return the last one seen.
+
+        Arriving frames are not the only source of replies: the vendor tool, a
+        killed session, or a rejected probe can leave a backlog behind. One
+        blocking read is not enough to recover from that, so this empties the
+        endpoint until it answers nothing.
+        """
+        last = b""
+        for _ in range(max_reads):
+            got = self._read_ack(timeout_ms=1)
+            if not got:
+                break
+            last = got
+        return last
+
+    def _read_ack(self, timeout_ms=None):
+        """One queued device reply, or ``b""`` if it did not answer in time."""
         try:
-            self._dev.read(EP_IN, 64, timeout=self._ack_timeout)
+            return bytes(self._dev.read(EP_IN, 64,
+                                        timeout=timeout_ms or self._ack_timeout))
         except usb.core.USBError:
-            pass
+            return b""
         except Exception:
-            pass
+            return b""
 
     # ------------------------------------------------------------- heartbeat
     def ping(self, timeout_ms=500):
+        self._drain_pending()
         self._dev.write(EP_OUT, bytes((0xA5, 0x5A, 0x09)), timeout=1000)
         try:
             return bytes(bytearray(self._dev.read(EP_IN, 64, timeout=timeout_ms)))

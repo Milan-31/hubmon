@@ -217,6 +217,45 @@ def ink_mid(font, text, top, bot):
     return top + (bot - top - max(1, b[3] - b[1])) / 2.0 - b[1]
 
 
+class TextCache:
+    """Rendered strings kept as alpha tiles.
+
+    PIL re-renders a glyph mask on every ``text`` call -- about 0.2 ms per
+    string here -- and a dashboard frame draws roughly thirty of them. Almost
+    every one of those strings only changes at 1-2 Hz (readouts, clock, host,
+    units), so the rendered tile is cached and blitted instead. The cache is
+    bounded; a stale entry is simply re-rendered.
+    """
+
+    def __init__(self, limit=600):
+        self._tiles = {}
+        self._limit = limit
+
+    def draw(self, img, xy, text, font, fill, stroke_width=0, stroke_fill=None):
+        if not text:
+            return
+        key = (text, id(font), fill, stroke_width, stroke_fill)
+        hit = self._tiles.get(key)
+        if hit is None:
+            pad = 2 + stroke_width
+            b = font.getbbox(text, stroke_width=stroke_width)
+            w = max(1, int(math.ceil(b[2] - b[0])) + 2 * pad + 2)
+            h = max(1, int(math.ceil(b[3] - b[1])) + 2 * pad + 2)
+            tile = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            ImageDraw.Draw(tile).text((pad - b[0], pad - b[1]), text,
+                                      font=font, fill=fill,
+                                      stroke_width=stroke_width,
+                                      stroke_fill=stroke_fill)
+            hit = (tile, pad - b[0], pad - b[1])
+            if len(self._tiles) >= self._limit:
+                self._tiles.clear()
+            self._tiles[key] = hit
+        tile, ox, oy = hit
+        # PIL truncates the origin to whole pixels; rounding would shift the
+        # clock and the centred rate readout by a pixel
+        img.paste(tile, (int(xy[0]) - ox, int(xy[1]) - oy), tile)
+
+
 # ------------------------------------------------------------ part naming ----
 # The panel is 320 px wide, so a full marketing name ("12th Gen Intel(R) Core(TM)
 # i5-12400F") cannot be shown; these pull the model out of it instead.
@@ -282,6 +321,9 @@ class RollText:
         self.t = 1.0
         self.speed = speed
         self.enabled = True
+        # the dashboard hands over its tile cache; without one (standalone use)
+        # the settled text falls back to a plain draw
+        self.cache = None
 
     def set(self, text):
         text = str(text)
@@ -319,7 +361,10 @@ class RollText:
     def draw(self, img, x, y):
         d = ImageDraw.Draw(img)
         if self.t >= 1.0 or self.prev == self.text:
-            d.text((x, y), self.text, font=self.font, fill=self.color)
+            if self.cache is not None:
+                self.cache.draw(img, (x, y), self.text, self.font, self.color)
+            else:
+                d.text((x, y), self.text, font=self.font, fill=self.color)
             return
 
         p = self.t * self.t * (3 - 2 * self.t)      # smoothstep
@@ -850,12 +895,20 @@ class Dashboard:
         self._static = None
         self._sig = None
         self._masks = {}
+        self._tc = TextCache()
         self._cpu_short = ""
         self._gpu_short = ""
         # liquid flow: last level seen per card, and the tilt it left behind
         self._lvl = {}
         self._tilt = {}
         self._tick = -1
+        # the pool picture only changes when its waterline, tilt or ripple step
+        # changes -- roughly nine times a second, not sixty -- so the last
+        # composited patch is kept and pasted back on the frames in between
+        self._water_img = {}
+        self._water_turn = 0
+        self._water_allow = set()
+        self._labels_img = None
         self._cores = "—"
         self._board = ""
         self._bg_key = None
@@ -959,6 +1012,8 @@ class Dashboard:
         self.num_fps = cls(self._f_mid, TEXT, ACCENT_GREEN)
         self._nums = (self.num_cpu, self.num_gpu, self.num_fc, self.num_fg,
                       self.num_mem, self.num_pwr, self.num_fps)
+        for r in self._nums:
+            r.cache = self._tc
         self._accent_rolls = {self.num_cpu: "accent_cpu", self.num_gpu: "accent_gpu",
                               self.num_fc: "accent_cpu", self.num_fg: "accent_gpu",
                               self.num_mem: "accent_mem", self.num_pwr: "accent_pwr"}
@@ -1163,9 +1218,11 @@ class Dashboard:
             for g in self.cards.values():
                 self._card(blur, img, g, self._radius)
 
-        # card captions sit above the liquid fill, so they are drawn per frame
-        # (see _labels) instead of being baked into the chrome
+        # card captions sit above the liquid fill, so they cannot be baked into
+        # the chrome itself; they are cached as a separate layer (see _labels)
         self._static = img
+        self._water_img = {}      # the pool patches were composited on the old base
+        self._labels_img = None   # captions may follow the new palette/geometry
 
     # ------------------------------------------------------------- spectrum --
     def _spec_tick_x(self, f):
@@ -1535,8 +1592,23 @@ class Dashboard:
             one.putalpha(one.getchannel("A").point(_alpha_lut(a)))
             _paste_overlay(img, one, px, py)
 
+    def _labels_layer(self):
+        """The captions as one transparent layer, baked once.
+
+        They have to sit above the pools, so they cannot live in the static
+        chrome; but their text and colours never move either, so drawing them
+        on every frame spent a fifth of the frame budget on six strings. A
+        single masked paste replaces that, and the cache is dropped whenever
+        the chrome is re-baked (config or layout change).
+        """
+        if self._labels_img is None:
+            lay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            self._labels(ImageDraw.Draw(lay))
+            self._labels_img = lay
+        return self._labels_img
+
     def _labels(self, d):
-        """Card captions, redrawn each frame so the pool never tints them."""
+        """Card captions, baked into a layer so the pool never tints them."""
         items = (("cpu", "CPU", "accent_cpu", ACCENT_CYAN),
                  ("gpu", "GPU", "accent_gpu", ACCENT_VIOLET)) + tuple(
                      (k, lbl, acc, TEXT_DIM) for k, lbl, acc in BOTTOM)
@@ -1716,16 +1788,31 @@ class Dashboard:
         # otherwise every sub-pixel wobble dirties the entire liquid area and
         # the USB cost explodes.
         sy = float(round((h - 1.0) - span * pct / 100.0))
+        # everything the pool reads is either the quantised waterline, the
+        # stepped ripple clock or the stepped tilt, so a signature of those
+        # pins the exact picture. Reuse it when nothing has advanced.
+        ph = (int(self.time * WATER_HZ) % 4000) * WATER_STEP
+        bob_tick = int(self.time * WATER_RISE)
+        tilt_lvl = round(self._tilt.get(key, 0.0), 3)
+        sig = (sy, ph, bob_tick, tilt_lvl, theme, box)
+        hit = self._water_img.get(key)
+        if hit is not None and hit[0] == sig:
+            img.paste(hit[1], (box[0], box[1]))
+            return
+        if hit is not None and key not in self._water_allow:
+            # over budget this frame: keep the previous pool picture and take
+            # the new signature next time, so nothing is dropped permanently
+            img.paste(hit[1], (box[0], box[1]))
+            return
         yy = np.arange(h, dtype=np.float32)[:, None]
         xx = np.arange(w, dtype=np.float32)[None, :]
-        ph = (int(self.time * WATER_HZ) % 4000) * WATER_STEP
         lam2 = WATER_LAM * 0.52
         # one swell with a shorter one riding it: both travel the same way, so
         # the surface reads as flowing, at different speeds so it does not slide
         # along as a rigid shape
         ripple = (0.72 * np.sin(xx / WATER_LAM * 6.283 + ph)
                   + 0.28 * np.sin(xx / lam2 * 6.283 + ph * 1.55))
-        bob = WATER_BOB * math.sin(int(self.time * WATER_RISE) * 0.75)
+        bob = WATER_BOB * math.sin(bob_tick * 0.75)
         tilt = self._tilt.get(key, 0.0) * (xx / max(1.0, w - 1.0) * 2.0 - 1.0)
         surf = sy + bob + tilt + WATER_AMP * ripple
         depth = yy - surf                      # >= 0 below the waterline
@@ -1753,9 +1840,10 @@ class Dashboard:
         a = (a * self._card_mask_np(key, g))[..., None]
 
         sub = np.asarray(img.crop(box), np.float32)
-        img.paste(Image.fromarray(
-            np.clip(sub * (1.0 - a) + col * a, 0, 255).astype(np.uint8), "RGB"),
-            (box[0], box[1]))
+        patch = Image.fromarray(
+            np.clip(sub * (1.0 - a) + col * a, 0, 255).astype(np.uint8), "RGB")
+        img.paste(patch, (box[0], box[1]))
+        self._water_img[key] = (sig, patch)
 
     # ------------------------------------------------------------- animation
     def step(self, dt):
@@ -1864,7 +1952,17 @@ class Dashboard:
             if c.lyrics_enable and self.lyric_visible:
                 self._lyric(img, d)
 
-        # the pools fill next; every readout is then drawn on top of them
+        # The pools fill next; every readout is then drawn on top of them.
+        # A pool repaint costs a couple of milliseconds, and all three would
+        # land on the same ripple tick, so the budget lets two of them through
+        # per frame and rotates which two: each pool still refreshes at 4-6 Hz
+        # (well above the eye's read of a slow slosh) but the frame cost never
+        # carries three repaints plus a numeral roll at once.
+        water_keys = ("cpu", "gpu", "mem")
+        turn = self._water_turn % len(water_keys)
+        self._water_allow = {water_keys[(turn + i) % len(water_keys)]
+                             for i in range(2)}
+        self._water_turn += 1
         for key, pct, theme in (("cpu", self.bar["cpu"], cpu_col),
                                 ("gpu", self.bar["gpu"], gpu_col),
                                 ("mem", self.v.mem, mem_col)):
@@ -1883,41 +1981,42 @@ class Dashboard:
                     max(0, self._radius - ins),
                     outline=col + (min(a, 60),), width=2)
 
-        self._labels(d)
+        labels = self._labels_layer()
+        if labels is not None:
+            img.paste(labels, (0, 0), labels)
         cpu_g, gpu_g = self.cards.get("cpu"), self.cards.get("gpu")
         if cpu_g is not None:
             self._big_card(d, img, cpu_g, self.num_cpu, self.num_fc, "GHz",
                            f"~{self.v.cpu_power:.0f} W" if c.show_watt else "",
                            TEXT_DIM, self._cpu_short)
-            self._chip(d, cpu_g, "CPU", self._cores, TEXT_DIM)
+            self._chip(d, img, cpu_g, "CPU", self._cores, TEXT_DIM)
         if gpu_g is not None:
             self._big_card(d, img, gpu_g, self.num_gpu, self.num_fg, "MHz",
                            f"~{self.v.gpu_power:.0f} W" if c.show_watt else "",
                            TEXT_DIM, self._gpu_short)
-            self._chip(d, gpu_g, "GPU",
+            self._chip(d, img, gpu_g, "GPU",
                        f"{self.v.temp_gpu:.0f}°C", ramp(TEMPERATURE_STOPS, self.v.temp_gpu))
 
         if "mem" in self.cards:
             g = self.cards["mem"]
             self.num_mem.draw(img, g.x + PAD, g.y + 17)
             sub = f"{self.v.mem_used:.0f}/{self.v.mem_total:.0f}G"
-            d.text((g.x + g.w - PAD - self._f_unit.getlength(sub), g.y + 6), sub,
-                   font=self._f_unit, fill=TEXT_DIM,
-                   stroke_width=1, stroke_fill=TEXT_SHADOW)
+            self._tc.draw(img,
+                          (g.x + g.w - PAD - self._f_unit.getlength(sub), g.y + 6),
+                          sub, self._f_unit, TEXT_DIM, 1, TEXT_SHADOW)
 
         if "power" in self.cards:
             g = self.cards["power"]
             self.num_pwr.draw(img, g.x + PAD, g.y + 17)
-            d.text((g.x + PAD + self.num_pwr.width() + 3, g.y + 32), "W",
-                   font=self._f_unit, fill=pwr_col,
-                   stroke_width=1, stroke_fill=TEXT_SHADOW)
+            self._tc.draw(img, (g.x + PAD + self.num_pwr.width() + 3, g.y + 32),
+                          "W", self._f_unit, pwr_col, 1, TEXT_SHADOW)
 
         if "fps" in self.cards:
             g = self.cards["fps"]
             self.num_fps.draw(img, g.x + PAD, g.y + 17)
             app = fit(self.v.fg_app or "—", self._f_app, g.w - PAD * 2)
-            d.text((g.x + PAD, g.y + 41), app, font=self._f_app, fill=TEXT_DIM,
-                   stroke_width=1, stroke_fill=TEXT_SHADOW)
+            self._tc.draw(img, (g.x + PAD, g.y + 41), app, self._f_app,
+                          TEXT_DIM, 1, TEXT_SHADOW)
 
         # the top bar is a plate in the quartz face and bare backdrop in glass,
         # so the band the text must stay inside is inset by the plate's bezel
@@ -1929,9 +2028,9 @@ class Dashboard:
         fmt = ("%H" if c.clock_24h else "%I") + (":%M:%S" if c.clock_seconds else ":%M")
         self.clock = time.strftime(fmt)
         cw = self._f_clock.getlength(self.clock)
-        d.text((TOP_BAR.x + TOP_BAR.w - cw - 14,
-                ink_mid(self._f_clock, self.clock, wtop, wbot)),
-               self.clock, font=self._f_clock, fill=TEXT)
+        self._tc.draw(img, (TOP_BAR.x + TOP_BAR.w - cw - 14,
+                            ink_mid(self._f_clock, self.clock, wtop, wbot)),
+                      self.clock, self._f_clock, TEXT)
 
         # left corner carries the board model as the firmware reports it, e.g.
         # 'Z690M Snow Dream' -- the whole string, not just the chipset. Long ones
@@ -1943,8 +2042,9 @@ class Dashboard:
             left_txt = self._board or self.v.host or "PC"
         room = TOP_BAR.w - 24 - cw - (64 if c.show_net else 0)
         left_txt = fit(left_txt, self._f_host, room)
-        d.text((TOP_BAR.x + 2, ink_mid(self._f_host, left_txt, wtop, wbot)),
-               left_txt, font=self._f_host, fill=TEXT)
+        self._tc.draw(img, (TOP_BAR.x + 2,
+                            ink_mid(self._f_host, left_txt, wtop, wbot)),
+                      left_txt, self._f_host, TEXT)
 
         if c.show_net:
             hw = self._f_host.getlength(left_txt)
@@ -1952,9 +2052,9 @@ class Dashboard:
             right = TOP_BAR.x + TOP_BAR.w - cw - 18
             net = fit(f"↓{rate(self.v.net_down)}/s ↑{rate(self.v.net_up)}/s",
                       self._f_net, right - left)
-            d.text(((left + right - self._f_net.getlength(net)) / 2.0,
-                    ink_mid(self._f_net, net, wtop, wbot)),
-                   net, font=self._f_net, fill=TEXT_DIM)
+            self._tc.draw(img, ((left + right - self._f_net.getlength(net)) / 2.0,
+                                ink_mid(self._f_net, net, wtop, wbot)),
+                          net, self._f_net, TEXT_DIM)
         # the power lamp: green while all is well, amber when the spectrum is up
         # but the capture is not. The top bar is already full -- plate name, rate
         # readout, clock -- and the lamp is the only free indicator there, so the
@@ -1968,34 +2068,32 @@ class Dashboard:
 
         return img
 
-    def _chip(self, d, g: Geo, label, text, col):
+    def _chip(self, d, img, g: Geo, label, text, col):
         """Small readout sitting just right of the card's label."""
         x = g.x + PAD + self._f_lbl.getlength(label) + 5
-        d.text((x, g.y + 5), text, font=self._f_lbl, fill=col,
-               stroke_width=1, stroke_fill=TEXT_SHADOW)
+        self._tc.draw(img, (x, g.y + 5), text, self._f_lbl, col, 1, TEXT_SHADOW)
 
     def _big_card(self, d, img, g: Geo, num_pct, freq_num, unit, rhs, rhs_col, spec):
         uw = self._f_unit.getlength(unit)
         vw = freq_num.width()
         fx = g.x + g.w - PAD - (vw + 3 + uw)
         freq_num.draw(img, fx, g.y + 4)
-        d.text((fx + vw + 3, g.y + 9), unit, font=self._f_unit, fill=TEXT_FAINT,
-               stroke_width=1, stroke_fill=TEXT_SHADOW)
+        self._tc.draw(img, (fx + vw + 3, g.y + 9), unit, self._f_unit,
+                      TEXT_FAINT, 1, TEXT_SHADOW)
 
         num_pct.draw(img, g.x + PAD, g.y + 18)
-        d.text((g.x + PAD + num_pct.width() + 3, g.y + 34), "%", font=self._f_sub,
-               fill=TEXT_DIM, stroke_width=1, stroke_fill=TEXT_SHADOW)
+        self._tc.draw(img, (g.x + PAD + num_pct.width() + 3, g.y + 34), "%",
+                      self._f_sub, TEXT_DIM, 1, TEXT_SHADOW)
         # the right-hand readout is optional: an empty string means the panel
         # asked for the card without it, so nothing is drawn at all
         if rhs:
-            d.text((g.x + g.w - PAD - self._f_sub.getlength(rhs), g.y + 34), rhs,
-                   font=self._f_sub, fill=rhs_col,
-                   stroke_width=1, stroke_fill=TEXT_SHADOW)
+            self._tc.draw(img, (g.x + g.w - PAD - self._f_sub.getlength(rhs),
+                                g.y + 34),
+                          rhs, self._f_sub, rhs_col, 1, TEXT_SHADOW)
         # part name, tucked in directly under the readout and above the pool
-        d.text((g.x + PAD, g.y + 50),
-               fit(spec or "—", self._f_spec, g.w - PAD * 2),
-               font=self._f_spec, fill=TEXT_DIM,
-               stroke_width=1, stroke_fill=TEXT_SHADOW)
+        self._tc.draw(img, (g.x + PAD, g.y + 50),
+                      fit(spec or "—", self._f_spec, g.w - PAD * 2),
+                      self._f_spec, TEXT_DIM, 1, TEXT_SHADOW)
 
     # ------------------------------------------------------------------ util
     def to_rgb565_be(self, img):
