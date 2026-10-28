@@ -236,6 +236,8 @@ SCHEMA = [
             {"caption": "歌词（需在 QQ 音乐开启 SMTC 并完全重启客户端）", "when": {"key": "mode", "eq": "spectrum"},
              "rows": [
                  {"key": "lyrics_enable", "label": "显示歌词", "type": "bool"},
+                 {"key": "lyrics_style", "label": "歌词样式", "type": "list",
+                  "options": [["vinyl", "唱片封面"], ["classic", "经典悬浮"]]},
                  {"key": "lyrics_effect", "label": "歌词动效", "type": "list",
                   "options": [["fade", "渐隐"], ["geom", "几何重构"],
                               ["rotate", "轮换"]]},

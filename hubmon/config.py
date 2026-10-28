@@ -78,6 +78,7 @@ class Config:
 
     # ---- lyrics overlay ---------------------------------------------------
     lyrics_enable: bool = False   # overlay the current song's lyric line
+    lyrics_style: str = "vinyl"   # "vinyl" three-row record scene | "classic"
     lyrics_effect: str = "rotate" # "fade" | "geom" | "rotate"
     lyrics_opacity: float = 0.55  # 0.3 .. 1.0 alpha of the lyric text
     lyrics_font: str = "youyuan"    # "youyuan" rounded | "xihei" thin sans

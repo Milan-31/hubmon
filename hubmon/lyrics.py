@@ -15,6 +15,7 @@ import json
 import os
 import re
 import threading
+import time
 import urllib.parse
 import urllib.request
 from bisect import bisect_right
@@ -28,6 +29,16 @@ try:
     _HAS_WINRT = True
 except Exception:
     _HAS_WINRT = False
+
+# The artwork comes back as a WinRT random-access stream, so reading it needs
+# the Storage.Streams projection as well. Kept separate from the watcher guard:
+# a machine with Media.Control but no Streams still reports the track, it just
+# has no cover to show.
+try:
+    from winrt.windows.storage.streams import DataReader
+    _HAS_STREAMS = True
+except Exception:
+    _HAS_STREAMS = False
 
 # [mm:ss.xx] or [mm:ss] timestamps. The fractional part is optional because some
 # sources drop it; the meta tags ([ti:], [by:], [offset:]) deliberately do not
@@ -289,6 +300,51 @@ class Lyrics:
         return lines
 
 
+# ------------------------------------------------------------ player presence
+# The band is only meaningful while a music player is actually open. SMTC also
+# carries browsers and video players, whose titles are music-video names often
+# enough that a lyric would otherwise appear with no player running.
+PLAYERS = (
+    # "music" alone already covers QQ音乐 (QQMusic.exe), 网易云 (cloudmusic.exe),
+    # 酷狗 (KGMusic.exe), 酷我 (kwmusic.exe), 咪咕 (MiguMusic.exe), Apple Music,
+    # Amazon Music and Windows' own Media Player (Music.UI.exe); the rest of the
+    # common desktop players carry no such word in their image name.
+    "music", "spotify", "foobar", "aimp", "winamp", "itunes", "tidal",
+    "qobuz", "deezer", "mediamonkey",
+)
+_PRESENCE_TTL = 2.0
+_presence = [0.0, False]
+
+
+def _scan_players():
+    """One pass over the process table for a music app; True/False, never raises."""
+    try:
+        import psutil
+    except Exception:
+        return True                   # cannot tell: keep the overlay's old behaviour
+    try:
+        for p in psutil.process_iter(["name"]):
+            name = (p.info.get("name") or "").lower()
+            if any(k in name for k in PLAYERS):
+                return True
+    except Exception:
+        return True
+    return False
+
+
+def music_app_running():
+    """Whether a music player in PLAYERS is open, memoised for 2 seconds.
+
+    The render thread asks this every frame, and walking the process table there
+    costs milliseconds, so the answer is cached rather than recomputed.
+    """
+    now = time.monotonic()
+    if now - _presence[0] > _PRESENCE_TTL:
+        _presence[0] = now
+        _presence[1] = _scan_players()
+    return _presence[1]
+
+
 # ---------------------------------------------------------------- SMTC watch
 def _com_apartment():
     """Bring a COM apartment up on the calling thread; returns the HRESULT, or None.
@@ -324,7 +380,7 @@ def _parse_song_id(genres):
 
 
 _EMPTY = {"title": "", "artist": "", "album": "", "status": "none",
-          "position_s": 0.0, "duration_s": 0.0, "song_id": ""}
+          "position_s": 0.0, "duration_s": 0.0, "song_id": "", "cover": b""}
 
 
 def _select(infos):
@@ -367,6 +423,10 @@ class MediaWatcher:
         self._stop = threading.Event()
         self._snap = dict(_EMPTY)
         self._thread = None
+        # artwork cache: a thumbnail is read once per track, never on the
+        # render thread and never once per poll
+        self._cover_key = None
+        self._cover = b""
 
     # ------------------------------------------------------------ life cycle
     def start(self):
@@ -403,20 +463,64 @@ class MediaWatcher:
                 session.try_get_media_properties_async())
             ps = int(session.get_playback_info().playback_status)
             tl = session.get_timeline_properties()
+            title = str(props.title or "")
+            artist = str(props.artist or "")
+            album = str(props.album_title or "")
+            song_id = _parse_song_id(props.genres)
             return {
-                "title": str(props.title or ""),
-                "artist": str(props.artist or ""),
-                "album": str(props.album_title or ""),
+                "title": title,
+                "artist": artist,
+                "album": album,
                 "status": ("playing" if ps == 4 else
                            "paused" if ps == 5 else "none"),
                 "position_s": float(tl.position.total_seconds()),
                 "duration_s": float(tl.end_time.total_seconds()),
-                "song_id": _parse_song_id(props.genres),
+                "song_id": song_id,
+                "cover": (self._read_cover(loop, props,
+                                           "%s|%s|%s|%s" % (title, artist,
+                                                            album, song_id))
+                          if ps == 4 else b""),
                 "playing": ps == 4,
                 "current": False,
             }
         except Exception:
             return None                  # a dying session is simply skipped
+
+    def _read_cover(self, loop, props, key):
+        """The track's artwork as encoded bytes, read once per track.
+
+        A thumbnail is a random-access stream in WinRT, so it is drained here,
+        on the poller's own loop, and cached against the track key. The render
+        thread then only ever receives a bytes object it can decode at leisure.
+        Nothing about a missing thumbnail may raise: artwork is decoration.
+        """
+        if key == self._cover_key:
+            return self._cover
+        self._cover_key = key
+        self._cover = b""
+        thumb = getattr(props, "thumbnail", None)
+        if thumb is None or not _HAS_STREAMS:
+            return self._cover
+        stream = reader = None
+        try:
+            stream = loop.run_until_complete(thumb.open_read_async())
+            size = int(stream.size)
+            if 0 < size <= 4 * 1024 * 1024:
+                reader = DataReader(stream)
+                loop.run_until_complete(reader.load_async(size))
+                buf = bytearray(size)
+                reader.read_bytes(buf)
+                self._cover = bytes(buf)
+        except Exception:
+            self._cover = b""
+        finally:
+            for obj in (reader, stream):
+                try:
+                    if obj is not None:
+                        obj.close()
+                except Exception:
+                    pass
+        return self._cover
 
     def _run(self):
         _com_apartment()               # the apartment belongs to this thread
@@ -453,6 +557,10 @@ LYRIC_CHAR = 0.22
 # them. Only the *length* is stretched here -- the shape of the motion is the
 # renderer's easing, which drifts the fragments out slowly and settles them home.
 LYRIC_GEOM_SLOW = 1.5
+# The three-row scene slides its stack up by one row when the line changes. That
+# travel is its own fixed-length beat -- the glyph reveal's length depends on the
+# sentence, which would make short lines snap and long ones crawl.
+LYRIC_SCROLL = 0.5
 
 
 def word_u(t, dur, k, slow=1.0):
@@ -490,6 +598,7 @@ class LyricState:
         self._prev = ""              # line being replaced, "" once settled
         self._clock = 0.0            # fallback clock when SMTC has no timeline
         self._rotate = 0             # switch count, drives the rotate effect
+        self._scroll = 1.0           # three-row stack travel, 0..1
 
     def _pick(self, raw):
         """Resolve the configured effect; "rotate" alternates on each switch."""
@@ -505,14 +614,16 @@ class LyricState:
             self._idx = -1
             self._t = 1.0
             self._prev = ""
+            self._scroll = 1.0
             self._clock = 0.0
 
         raw = getattr(cfg, "lyrics_effect", "rotate")
         eff = self._pick(raw)
 
         if not lines or snap.get("status") != "playing":
-            return {"visible": False, "text": "", "prev": "", "t": 1.0,
-                    "effect": eff, "position_s": 0.0, "dur": LYRIC_CHAR}
+            return {"visible": False, "text": "", "prev": "", "next": "",
+                    "t": 1.0, "scroll": 1.0, "effect": eff,
+                    "position_s": 0.0, "dur": LYRIC_CHAR}
 
         if snap.get("duration_s", 0.0) > 0:
             now = float(snap.get("position_s", 0.0))   # SMTC keeps the timeline
@@ -527,9 +638,12 @@ class LyricState:
             self._prev = lines[self._idx][1] if 0 <= self._idx < len(lines) else ""
             self._idx = idx
             self._t = 0.0
+            self._scroll = 0.0
             if raw == "rotate":
                 self._rotate += 1
                 eff = self._pick(raw)
+        else:
+            self._scroll = min(1.0, self._scroll + dt / LYRIC_SCROLL)
         # The line's transition length is its glyph count: the last glyph starts
         # LYRIC_STAGGER*(n-1) in and takes LYRIC_CHAR, so dur covers the whole
         # left-to-right reveal -- stretched for geom, whose flight is longer.
@@ -541,5 +655,7 @@ class LyricState:
             self._t = min(1.0, self._t + dt / dur)
 
         prev = self._prev if self._t < 1.0 else ""
-        return {"visible": bool(text), "text": text, "prev": prev,
-                "t": self._t, "effect": eff, "position_s": now, "dur": dur}
+        nxt = lines[idx + 1][1] if 0 <= idx + 1 < len(lines) else ""
+        return {"visible": bool(text), "text": text, "prev": prev, "next": nxt,
+                "t": self._t, "scroll": self._scroll, "effect": eff,
+                "position_s": now, "dur": dur}

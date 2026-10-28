@@ -41,6 +41,26 @@ class Demo:
 
     def __init__(self):
         self.t = 0.0
+        self._cover = self._make_cover()
+
+    @staticmethod
+    def _make_cover():
+        """A fake album sleeve, so the vinyl scene previews without a player."""
+        try:
+            import io
+            from PIL import Image, ImageDraw
+            im = Image.new("RGB", (128, 128), (24, 34, 62))
+            d = ImageDraw.Draw(im)
+            for i in range(-128, 256, 16):
+                d.polygon(((i, 128), (i + 34, 128), (i + 34 + 90, 0),
+                           (i + 90, 0)), fill=(44, 96, 168))
+            d.ellipse((34, 30, 94, 90), fill=(226, 120, 72))
+            d.ellipse((52, 48, 76, 72), fill=(24, 34, 62))
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=88)
+            return buf.getvalue()
+        except Exception:
+            return b""
 
     def snapshot(self):
         self.t += 0.125
@@ -72,9 +92,12 @@ class Demo:
             fg_app="GameViewer.exe", fg_fps=138 + 12 * math.sin(t * 0.9),
             host="MILAN", board_name="Z690M Snow Dream",
             lyric_text=lines[j], lyric_prev=lines[j - 1],
+            lyric_next=lines[(j + 1) % len(lines)],
             lyric_t=min(1.0, (t - slot * 3.0) / 0.4),
+            lyric_scroll=min(1.0, (t - slot * 3.0) / lyrics.LYRIC_SCROLL),
             lyric_dur=lyrics.LYRIC_CHAR + lyrics.LYRIC_STAGGER * (len(lines[j]) - 1),
-            lyric_effect="geom" if slot % 2 else "fade", lyric_visible=True)
+            lyric_effect="geom" if slot % 2 else "fade", lyric_visible=True,
+            lyric_song="demo|artist", cover=self._cover)
 
 
 def run_preview(cfg, outdir, frames, fps):
@@ -504,20 +527,30 @@ def run_stream(cfg, demo=False, log_every=5.0):
                         stats["spectrum_peaks"] = peaks
                     stats["spec_state"] = spec.state
                     if want_spec and cfg.lyrics_enable and not demo:
-                        snap = watcher.snapshot()
-                        song = "%s|%s" % (snap["title"], snap["artist"])
-                        if song != track["song"]:          # new track: look up once
-                            track["song"] = song
-                            track["lines"] = provider_lyrics.lines_for(
-                                snap["title"], snap["artist"], snap["album"],
-                                snap["duration_s"], snap["song_id"])
-                        lst = lstate.update(cfg, snap, track["lines"], dt)
-                        stats["lyric_text"] = lst["text"]
-                        stats["lyric_prev"] = lst["prev"]
-                        stats["lyric_t"] = lst["t"]
-                        stats["lyric_effect"] = lst["effect"]
-                        stats["lyric_visible"] = lst["visible"]
-                        stats["lyric_dur"] = lst["dur"]
+                        # no music app open: SMTC may still offer a browser or a
+                        # video player, so the band stays empty instead
+                        if not lyrics.music_app_running():
+                            stats["lyric_text"] = ""
+                            stats["lyric_visible"] = False
+                        else:
+                            snap = watcher.snapshot()
+                            song = "%s|%s" % (snap["title"], snap["artist"])
+                            if song != track["song"]:      # new track: look up once
+                                track["song"] = song
+                                track["lines"] = provider_lyrics.lines_for(
+                                    snap["title"], snap["artist"], snap["album"],
+                                    snap["duration_s"], snap["song_id"])
+                            lst = lstate.update(cfg, snap, track["lines"], dt)
+                            stats["lyric_text"] = lst["text"]
+                            stats["lyric_prev"] = lst["prev"]
+                            stats["lyric_next"] = lst["next"]
+                            stats["lyric_t"] = lst["t"]
+                            stats["lyric_scroll"] = lst["scroll"]
+                            stats["lyric_effect"] = lst["effect"]
+                            stats["lyric_visible"] = lst["visible"]
+                            stats["lyric_dur"] = lst["dur"]
+                            stats["lyric_song"] = song
+                            stats["cover"] = snap.get("cover") or b""
                     dash.update(stats)
                     img = dash.render(dt)
                     # one conversion pass per frame with reused scratch buffers;

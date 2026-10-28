@@ -21,6 +21,8 @@ Design notes
 """
 from __future__ import annotations
 
+import colorsys
+import io
 import math
 import os
 import re
@@ -133,14 +135,14 @@ _LYRIC_FACES = {
 LYRIC_SIZE = 21
 
 
-def _face_for(name):
+def _face_for(name, size=LYRIC_SIZE):
     """The lyric font for a config name, walking that face's fallback chain."""
     for n in _LYRIC_FACES.get(name) or ():
         try:
-            return ImageFont.truetype(f"{FONT_DIR}/{n}", LYRIC_SIZE)
+            return ImageFont.truetype(f"{FONT_DIR}/{n}", size)
         except Exception:
             continue
-    return _cjk(LYRIC_SIZE)
+    return _cjk(size)
 
 
 _RGB = {}           # "#rrggbb" -> (r, g, b); the panel asks for the same few
@@ -758,6 +760,37 @@ LYRIC_GEOM_FLOOR = 0.6
 LYRIC_WIN_TOP = SPEC_TOP - 1
 LYRIC_WIN_BOT = LYRIC_TOP + LYRIC_LINE_STEP + LYRIC_H + 8
 
+# ------------------------------------------------------------ vinyl lyrics --
+# The lyric scene rearranges the spectrum mode around a record: the sleeve
+# spins on the left, three lines of lyric scroll past on the right, and the
+# bars are compressed into a strip along the very bottom edge. The artwork is
+# most of the record now, so only the rim is bare; it is the one baked ring and
+# the sleeve itself that move, which keeps the scene inside the link budget.
+VINYL_CX, VINYL_CY, VINYL_R = 58, 85, 47
+VINYL_ART_R = VINYL_R - 2     # the sleeve fills the disc; only a rim is left
+VINYL_SPIN = 11.0             # deg/s, constant, like a turntable
+LYR_X0, LYR_X1 = 110, 312
+LYR_CY = 86
+LYR_STEP = 35
+LYR_ROW_TOP, LYR_ROW_BOT = 32, 145    # where a travelling row is clipped
+# One size for all three rows on purpose: the focus is carried by brightness,
+# so the rows sliding past each other stay exactly registered. Two sizes would
+# make a line that is mid-travel (large in the old stack, small in the new one)
+# draw twice at two widths, and the ghost is far uglier than a missing size pop.
+LYR_SIZE = 21
+# A long line is not cut to an ellipsis: the live row holds the full sentence
+# and slides sideways, ping-pong style, so the tail is readable while the line
+# rests. The travel time is fixed, so short and long lines move alike.
+LYR_MARQ_HOLD = 0.9          # seconds parked at each end
+LYR_MARQ_TRAVEL = 2.2        # seconds to cross the overhang, one way
+LYR_GLOW_ALPHA = 72          # the halo behind a glyph, as part alpha
+LYR_WEIGHT_ALPHA = 110       # how much of the 1 px rim is kept as extra weight
+# The meter moves into the backdrop here: whatever spectrum style is selected
+# is drawn full height behind the record and faded to this alpha, so the motion
+# is readable without a narrow strip and without competing with the lyrics.
+VINYL_BG_ALPHA = 190
+VINYL_BG_LIFT = 0.22         # white mixed into the bars before they fade in
+
 # The spectrum's styles, as (baked chrome, live bars). Chrome runs once per bake
 # and draws whatever is identical every frame; bars runs every frame. Adding a
 # style is two methods and one line here -- the dispatch itself never grows, and
@@ -917,6 +950,75 @@ def _wrap(txt, font, span):
     return [fit(a, font, span), fit(b, font, span)] if b else [fit(txt, font, span)]
 
 
+def _decode_cover(blob):
+    """The sleeve as a small RGB image, or None when there is nothing usable."""
+    if not blob:
+        return None
+    try:
+        im = Image.open(io.BytesIO(blob))
+        im.load()
+        return ImageOps.fit(im.convert("RGB"), (128, 128), Image.LANCZOS)
+    except Exception:
+        return None
+
+
+def _cover_theme(im):
+    """The sleeve's accent colour: its most chromatic, reasonably bright tone.
+
+    Averaging every pixel is the naive approach and it always returns grey-brown
+    -- album art is mostly one photograph, so its mean sits near the middle.
+    Picking the most *chromatic* patch instead keeps the colour the sleeve
+    actually reads as; the HSV clamp then keeps it dark enough for white type.
+    """
+    if im is None:
+        return None
+    try:
+        small = im.resize((16, 16), Image.BILINEAR)
+        cols = list(small.getdata())
+        best = max(cols, key=lambda c: (max(c) - min(c)) * 2 + max(c))
+        h, s, v = colorsys.rgb_to_hsv(*[c / 255.0 for c in best])
+        s, v = max(0.45, min(1.0, s * 1.25)), max(0.42, min(0.62, v))
+        return tuple(int(round(c * 255))
+                     for c in colorsys.hsv_to_rgb(h, s, v))
+    except Exception:
+        return None
+
+
+def _hue_theme(name):
+    """A stable colour for a track with no sleeve, so the scene still tints."""
+    h = (zlib.crc32((name or "hubmon").encode("utf-8")) % 360) / 360.0
+    return tuple(int(round(c * 255)) for c in colorsys.hsv_to_rgb(h, 0.55, 0.52))
+
+
+def _label_art(im, theme):
+    """The sleeve itself: the artwork fills the disc, leaving only the rim.
+
+    The record no longer has a small centre label: the sleeve is the disc, so
+    the whole face reads as cover art and a single rim is all the decoration it
+    gets (that rim is baked with the plate, not drawn here).
+    """
+    n = VINYL_ART_R * 2
+    if im is not None:
+        art = ImageOps.fit(im, (n, n), Image.LANCZOS).convert("RGBA")
+    else:
+        art = Image.new("RGB", (n, n), mix(theme, (10, 12, 16), 0.28))
+        ad = ImageDraw.Draw(art)
+        ink = mix(theme, (255, 255, 255), 0.40)
+        try:
+            ad.text((n // 2, n // 2), "♪", font=F(26, "bold"), fill=ink,
+                    anchor="mm")
+        except Exception:
+            pass
+        art = art.convert("RGBA")
+    mask = Image.new("L", (n * 4, n * 4), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, n * 4 - 1, n * 4 - 1), fill=255)
+    art.putalpha(mask.resize((n, n), Image.LANCZOS))
+    # a touch of the disc shows through the sleeve, which is what keeps the
+    # scene reading as an underlay instead of a photo pasted over the panel
+    art.putalpha(art.getchannel("A").point(_alpha_lut(214)))
+    return art
+
+
 class Dashboard:
     def __init__(self, cfg=None):
         from .config import Config
@@ -995,6 +1097,28 @@ class Dashboard:
         self._lyr_cache = {}                 # (txt, face, colour, glow) -> cells
         self._glyphs = {}     # (id(layer), alpha) -> opacity-scaled glyph layer
 
+        # vinyl lyric scene: the sleeve, its tinted plate, and the three-row
+        # carousel. The cover is decoded once per track, never per frame.
+        self.lyric_next = ""
+        self.lyric_scroll = 1.0
+        self._car = ["", "", ""]             # the stack on stage
+        self._car_old = ["", "", ""]         # the stack sliding out, if any
+        self._cover_bytes = None
+        self._cover_song = None
+        self._cover_img = None
+        self._theme_rgb = None
+        self._label = None
+        self._label_rot = (None, None)       # (angle, rotated label)
+        self._faces = {}                     # (face name, size) -> font
+        self._rows = {}                      # cached lyric row tiles
+        self._vinyl_bg_layer = None          # scratch layer for the backdrop meter
+        self._row_txt = ""                   # the line the marquee clock belongs to
+        self._row_t0 = 0.0
+        self._row_txt_old = ""
+        self._row_t0_old = 0.0
+        self._vinyl_on = False               # the baked plate is the record one
+        self._vinyl_sig = None
+
         self._layout()
         self.apply_config(self.cfg, force=True)
 
@@ -1023,6 +1147,7 @@ class Dashboard:
         return (c.mode,
                 c.spectrum_style,
                 c.style,
+                getattr(c, "lyrics_style", "vinyl"),
                 c.accent_cpu, c.accent_gpu, c.accent_mem, c.accent_pwr,
                 round(c.brightness, 3), round(c.bg_brightness, 3),
                 round(c.saturation, 3), round(c.glass, 3),
@@ -1124,9 +1249,24 @@ class Dashboard:
         self.spec_state = stats.get("spec_state", "")
         self.lyric_text = stats.get("lyric_text") or ""
         self.lyric_prev = stats.get("lyric_prev") or ""
+        self.lyric_next = stats.get("lyric_next") or ""
         self.lyric_t = float(stats.get("lyric_t", 1.0))
+        self.lyric_scroll = float(stats.get("lyric_scroll", 1.0))
         self.lyric_effect = stats.get("lyric_effect") or "fade"
         self.lyric_visible = bool(stats.get("lyric_visible", False))
+        # the sleeve is handed over as encoded bytes that the watcher reuses
+        # between polls, so identity is the cheap "is this a new track" test;
+        # the decode and the palette pick then run once, not once per frame
+        cover = stats.get("cover") or b""
+        song = stats.get("lyric_song") or ""
+        if cover is not self._cover_bytes or song != self._cover_song:
+            self._cover_bytes = cover
+            self._cover_song = song
+            self._cover_img = _decode_cover(cover)
+            self._theme_rgb = (_cover_theme(self._cover_img)
+                               or _hue_theme(song))
+            self._label = _label_art(self._cover_img, self._theme_rgb)
+            self._label_rot = (None, None)
         # the reveal length travels with the line (LyricState computes it from the
         # glyph count); the non-lyric paths simply carry no key, so the default
         # stands in. The face is re-picked every frame -- cached, so it is free.
@@ -1252,7 +1392,10 @@ class Dashboard:
             self._masks = {}
         img = ImageEnhance.Brightness(back).enhance(c.brightness)
         if c.mode == "spectrum":
-            self._spectrum_chrome(img, back, c)
+            if self._vinyl_on:
+                self._vinyl_static(img, back, c)
+            else:
+                self._spectrum_chrome(img, back, c)
         elif c.style == "quartz":
             self._plate(img, back, TOP_BAR, PLATE_BEZEL)
             for g in self.cards.values():
@@ -1324,6 +1467,34 @@ class Dashboard:
             d.line((x, SPEC_RAIL_Y + 1, x, SPEC_RAIL_Y + 4),
                    fill=(255, 255, 255, 34))
             d.text((x + 2, SPEC_TICK_Y), label, font=self._f_tick, fill=TEXT_DIM)
+
+    def _vinyl_static(self, img, back, c):
+        """Bake the record scene's resting parts: sleeve tint and disc seat.
+
+        The disc itself is only a dark seat and a drop shadow now -- the sleeve
+        covers it, and the single rim that frames it is drawn with the sleeve so
+        it always sits on top of the art.
+        """
+        theme = self._theme_rgb or (74, 96, 132)
+        base = ImageEnhance.Brightness(back).enhance(
+            max(0.0, 0.82 * c.brightness))
+        # the sleeve colour, as a wash that gathers towards the bottom so the
+        # header stays quiet while the art and the meter sit in colour
+        wash = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        wd = ImageDraw.Draw(wash)
+        for y in range(H):
+            t = y / float(H - 1)
+            wd.line((0, y, W, y), fill=theme + (int(24 + 104 * (t ** 1.5)),))
+        img.paste(Image.alpha_composite(base.convert("RGBA"), wash)
+                  .convert("RGB"), (0, 0))
+
+        d = ImageDraw.Draw(img, "RGBA")
+        cx, cy, R = VINYL_CX, VINYL_CY, VINYL_R
+        # a soft drop shadow, so the record sits on the sleeve, not on top of it
+        for k in (8, 5, 2):
+            d.ellipse((cx - R - k, cy - R - k + 3, cx + R + k, cy + R + k + 3),
+                      outline=(0, 0, 0, 26))
+        d.ellipse((cx - R, cy - R, cx + R, cy + R), fill=(9, 10, 13, 168))
 
     def _chrome_led(self, img, d):
         """The unlit cells, which are the LED face's texture; baked, they are free."""
@@ -1476,6 +1647,213 @@ class Dashboard:
             d.rectangle((x, SPEC_BOT - h + 1, x1, SPEC_BOT), fill=body + (255,))
             d.rectangle((x, SPEC_BOT - h + 1, x1, SPEC_BOT - h + 1),
                         fill=head + (255,))
+
+    # ----------------------------------------------------------- vinyl lyric --
+    def _vinyl_live(self, img, d):
+        """Draw the record scene's moving parts, back to front."""
+        self._vinyl_bg(img, d)
+        self._vinyl_label(img, d)
+        self._vinyl_rows(img)
+
+    def _vinyl_bg(self, img, d):
+        """The selected spectrum style, full height and faded into the backdrop.
+
+        The panel's own bar painter is reused on its own layer and the whole
+        layer is then faded, so every switchable style reads here without a
+        second set of painters -- and the motion spans the panel instead of a
+        strip too thin to see. Drawn first, it sits under the sleeve and type.
+        """
+        style = (self.cfg.spectrum_style or DEFAULT_STYLE).lower()
+        _, bars = STYLES.get(style, STYLES[DEFAULT_STYLE])
+        lay = self._vinyl_bg_layer
+        if lay is None:
+            lay = self._vinyl_bg_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        else:
+            lay.paste((0, 0, 0, 0), (0, 0, W, H))
+        accent = hex_rgb(self.cfg.accent_cpu, ACCENT_CYAN)
+        # the backdrop copy is faded on its way in, so it starts lighter than
+        # the strip version: the lift brightens the bars without making the
+        # whole layer more opaque and dulling the scene behind them
+        accent = mix(accent, (255, 255, 255), VINYL_BG_LIFT)
+        getattr(self, bars)(lay, ImageDraw.Draw(lay, "RGBA"),
+                            self.spectrum_bands, self.spectrum_peaks, accent)
+        lay.putalpha(lay.getchannel("A").point(_alpha_lut(VINYL_BG_ALPHA)))
+        img.paste(lay, (0, 0), lay)
+
+    def _vinyl_label(self, img, d):
+        """The sleeve, spinning at a constant rate inside the disc's rim."""
+        if self._label is None:
+            return
+        angle = (self.time * VINYL_SPIN) % 360.0
+        # half-degree buckets: the rotation is rebuilt only when it has moved
+        # enough to show, so most frames reuse the last paste
+        q = round(angle * 2.0) / 2.0
+        if self._label_rot[0] != q:
+            self._label_rot = (q, self._label.rotate(-q, resample=Image.BILINEAR))
+        rot = self._label_rot[1]
+        img.paste(rot, (VINYL_CX - VINYL_ART_R, VINYL_CY - VINYL_ART_R), rot)
+        # the sleeve's only decoration: one black rim, drawn after the art so
+        # it stays crisp no matter which way the cover is turned
+        d.ellipse((VINYL_CX - VINYL_R, VINYL_CY - VINYL_R,
+                   VINYL_CX + VINYL_R, VINYL_CY + VINYL_R),
+                  outline=(6, 7, 10, 235), width=2)
+
+    def _vinyl_face(self, size):
+        """The lyric face at ``size``, cached per face name and size."""
+        key = (self._face_key, size)
+        f = self._faces.get(key)
+        if f is None:
+            if len(self._faces) > 8:
+                self._faces.clear()
+            f = self._faces[key] = _face_for(self._face_key, size)
+        return f
+
+    def _vinyl_row(self, txt, alpha, full=False):
+        """One lyric row as a cached RGBA tile, plus where its ink starts.
+
+        ``full`` keeps the whole sentence rather than fitting it to the column;
+        the live row uses it so a line too long for the panel can slide sideways
+        and show its tail instead of dying in an ellipsis.
+        """
+        color = hex_rgb(getattr(self.cfg, "lyrics_color", "#eef3fb"),
+                        (238, 243, 251))
+        glow = bool(getattr(self.cfg, "lyrics_glow", True))
+        # alpha is bucketed: during the slide it varies every frame, and one
+        # cache entry per 12/255 step is plenty for the eye on this panel
+        a = max(0, min(255, (int(alpha) // 12) * 12))
+        key = (txt, self._face_key, a, color, glow, full)
+        got = self._rows.get(key)
+        if got is not None:
+            return got
+        f = self._vinyl_face(LYR_SIZE)
+        if not full:
+            txt = fit(txt, f, LYR_X1 - LYR_X0)
+        pad = LYRIC_PAD + (3 if glow else 0)
+        b = f.getbbox(txt, stroke_width=1)
+        w = max(1, int(math.ceil(f.getlength(txt))) + 2 * pad)
+        h = max(1, b[3] - b[1] + 2 * pad)
+        o = (pad - b[0], pad - b[1])
+        ink = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(ink).text(o, txt, font=f, fill=255)
+        # the face is a thin rounded one, so a little weight is added by carrying
+        # its 1 px rim in the glyph's own colour at part alpha: strokes thicken
+        # by well under a pixel and the letterform still keeps its own contours,
+        # which is the middle ground between the bare face and faux bold
+        bold = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(bold).text(o, txt, font=f, fill=255,
+                                  stroke_width=1, stroke_fill=255)
+        edge = ImageChops.subtract(bold, ink).point(_alpha_lut(LYR_WEIGHT_ALPHA))
+        ink = ImageChops.lighter(ink, edge)
+        lay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        if glow:
+            # a halo, not a bloom: at full strength the blur alone matches the
+            # glyph's own brightness, and without the old dark rim to sit on it
+            # the row read as soft-edged instead of bold
+            g = Image.new("RGBA", (w, h), color + (0,))
+            g.putalpha(ink.filter(ImageFilter.GaussianBlur(1.4))
+                       .point(_alpha_lut(LYR_GLOW_ALPHA)))
+            lay = Image.alpha_composite(lay, g)
+        face = Image.new("RGBA", (w, h), color + (0,))
+        face.putalpha(ink)
+        lay = Image.alpha_composite(lay, face)
+        lay.putalpha(lay.getchannel("A").point(_alpha_lut(a)))
+        got = (lay, o[1], b[3] - b[1])
+        if len(self._rows) > 64:
+            self._rows.clear()
+        self._rows[key] = got
+        return got
+
+    def _vinyl_row_at(self, img, txt, alpha, cy, full=False, t0=0.0):
+        """Paste one row centred on ``cy``, clipped to the lyric window.
+
+        A settled row that is wider than the column is not fitted: it ping-pongs
+        across the overhang, holding at each end, which is what lets the whole
+        line be read without leaving the three-row layout.
+        """
+        if not txt or alpha <= 6:
+            return
+        tile, dy, ink_h = self._vinyl_row(txt, alpha, full)
+        col = LYR_X1 - LYR_X0
+        x = int(round((LYR_X0 + LYR_X1) / 2.0 - tile.width / 2.0))
+        if full and tile.width > col:
+            over = tile.width - col
+            cycle = 2.0 * (LYR_MARQ_HOLD + LYR_MARQ_TRAVEL)
+            t = (self.time - t0) % cycle
+            if t < LYR_MARQ_HOLD:
+                off = 0.0
+            elif t < LYR_MARQ_HOLD + LYR_MARQ_TRAVEL:
+                off = over * (t - LYR_MARQ_HOLD) / LYR_MARQ_TRAVEL
+            elif t < 2.0 * LYR_MARQ_HOLD + LYR_MARQ_TRAVEL:
+                off = over
+            else:
+                off = over * (1.0 - (t - 2.0 * LYR_MARQ_HOLD
+                                     - LYR_MARQ_TRAVEL) / LYR_MARQ_TRAVEL)
+            x = int(round(LYR_X0 - off))
+        y = int(round(cy - ink_h / 2.0 - dy))
+        # the crop is measured against where the tile would land before it is
+        # clamped to the column: a marquee tile starts left of the window, and
+        # using the clamped x for the right edge would collapse the slice
+        px = x
+        x0, x1 = 0, tile.width
+        y0, y1 = 0, tile.height
+        if px < LYR_X0:
+            x0, x = LYR_X0 - px, LYR_X0
+        if px + tile.width > LYR_X1:
+            x1 = LYR_X1 - px
+        if y < LYR_ROW_TOP:
+            y0, y = LYR_ROW_TOP - y, LYR_ROW_TOP
+        if y + tile.height > LYR_ROW_BOT:
+            y1 = LYR_ROW_BOT - y
+        if y1 <= y0 or x1 <= x0:
+            return
+        if x0 or y0 or x1 != tile.width or y1 != tile.height:
+            tile = tile.crop((x0, y0, x1, y1))
+        img.paste(tile, (x, y), tile)
+
+    def _vinyl_rows(self, img):
+        """Keep three lines on stage: the live one centred, its neighbours dim.
+
+        When the live line changes the outgoing stack is kept and both stacks
+        travel one row together -- the old one up, the new one into place -- so
+        the pair reads as a reel rather than a cross-fade. ``lyric_scroll`` is
+        LyricState's fixed-length travel clock, which is what keeps short and
+        long lines moving at the same pace.
+        """
+        stack = [self.lyric_prev, self.lyric_text, self.lyric_next]
+        if stack != self._car:
+            if stack[1] and stack[1] != self._car[1]:
+                self._car_old = list(self._car)
+                # the marquee clock belongs to the line, not the panel: the new
+                # line starts its hold when it swaps in, and the outgoing one
+                # keeps sliding from where it was for the half-second it fades
+                self._row_t0_old, self._row_txt_old = self._row_t0, self._row_txt
+                self._row_t0, self._row_txt = self.time, stack[1]
+            self._car = stack
+        p = max(0.0, min(1.0, float(self.lyric_scroll)))
+        e = 1.0 - (1.0 - p) ** 3
+        op = max(0.3, min(1.0, float(self.cfg.lyrics_opacity)))
+        cur_a = 255 * min(1.0, 0.55 + 0.75 * op)
+        adj_a = 255 * min(0.60, 0.85 * op)
+        # the outgoing stack only makes sense while its rows still match the
+        # incoming one; a jump (track change, skipped lines) drops it whole
+        joined = (self._car_old[1] == self._car[0]
+                  and self._car_old[2] == self._car[1])
+        if p < 1.0 and joined:
+            for slot, txt in enumerate(self._car_old):
+                cy = LYR_CY + (slot - 1) * LYR_STEP - e * LYR_STEP
+                # the row leaving the top of the reel fades faster than the
+                # two that are still on stage, so the transient fourth line is
+                # gone by the time it would crowd the header
+                fade = (1.0 - e) if slot else (1.0 - e) ** 4
+                self._vinyl_row_at(img, txt,
+                                   (cur_a if slot == 1 else adj_a) * fade, cy,
+                                   full=(slot == 1), t0=self._row_t0_old)
+        for slot, txt in enumerate(self._car):
+            cy = LYR_CY + (slot - 1) * LYR_STEP + (1.0 - e) * LYR_STEP
+            fade = 1.0 if p >= 1.0 else (e ** 3 if slot == 2 else e)
+            self._vinyl_row_at(img, txt,
+                               (cur_a if slot == 1 else adj_a) * fade, cy,
+                               full=(slot == 1), t0=self._row_t0)
 
     # ------------------------------------------------------------------ lyric
     def _lyric(self, img, d):
@@ -1998,6 +2376,19 @@ class Dashboard:
 
     # ---------------------------------------------------------------- render
     def render(self, dt):
+        c = self.cfg
+        # The record scene replaces the whole spectrum plate, so switching it on
+        # or off (and starting a new track, whose sleeve retints the plate) is a
+        # re-bake -- once per song, never per frame.
+        want_vinyl = (c.mode == "spectrum" and bool(c.lyrics_enable)
+                      and self.lyric_visible
+                      and (getattr(c, "lyrics_style", "vinyl") or "vinyl")
+                      == "vinyl")
+        sig = (want_vinyl, self._theme_rgb) if want_vinyl else None
+        if sig != self._vinyl_sig:
+            self._vinyl_sig = sig
+            self._vinyl_on = want_vinyl
+            self._static = None
         if self._static is None:
             self._build_static()
         self.step(dt)
@@ -2019,11 +2410,14 @@ class Dashboard:
         d = ImageDraw.Draw(img, "RGBA")
 
         if c.mode == "spectrum":
-            # the bars are the only thing in this mode that is not baked
-            self._spectrum_bars(img, d)
-            # the lyric rides on top of them, and only when it is on
-            if c.lyrics_enable and self.lyric_visible:
-                self._lyric(img, d)
+            if self._vinyl_on:
+                self._vinyl_live(img, d)
+            else:
+                # the bars are the only thing in this mode that is not baked
+                self._spectrum_bars(img, d)
+                # the lyric rides on top of them, and only when it is on
+                if c.lyrics_enable and self.lyric_visible:
+                    self._lyric(img, d)
 
         # The pools fill next; every readout is then drawn on top of them.
         # A pool repaint costs a couple of milliseconds, and all three would
