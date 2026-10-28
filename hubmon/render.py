@@ -761,14 +761,15 @@ LYRIC_WIN_TOP = SPEC_TOP - 1
 LYRIC_WIN_BOT = LYRIC_TOP + LYRIC_LINE_STEP + LYRIC_H + 8
 
 # ------------------------------------------------------------ vinyl lyrics --
-# The lyric scene rearranges the spectrum mode around a record: the sleeve
-# spins on the left, three lines of lyric scroll past on the right, and the
-# bars are compressed into a strip along the very bottom edge. The artwork is
-# most of the record now, so only the rim is bare; it is the one baked ring and
-# the sleeve itself that move, which keeps the scene inside the link budget.
-VINYL_CX, VINYL_CY, VINYL_R = 58, 85, 47
-VINYL_ART_R = VINYL_R - 2     # the sleeve fills the disc; only a rim is left
-VINYL_SPIN = 11.0             # deg/s, constant, like a turntable
+# The lyric scene rearranges the spectrum mode around the current sleeve: the
+# artwork sits as a rounded card on the left, three lines of lyric scroll past
+# on the right, and the bars have moved into a faded backdrop behind both.
+# An early draft spun the sleeve like a record; every half-degree step then
+# repainted the whole disc, and that dirty area -- not the drawing itself --
+# was what capped the stream. Nailed down it costs one paste per frame.
+VINYL_X0, VINYL_Y0 = 13, 38
+VINYL_W, VINYL_H = 92, 92
+VINYL_RADIUS = 10
 LYR_X0, LYR_X1 = 110, 312
 LYR_CY = 86
 LYR_STEP = 35
@@ -991,31 +992,32 @@ def _hue_theme(name):
 
 
 def _label_art(im, theme):
-    """The sleeve itself: the artwork fills the disc, leaving only the rim.
+    """The sleeve itself: the artwork on a rounded card, with one rim.
 
-    The record no longer has a small centre label: the sleeve is the disc, so
-    the whole face reads as cover art and a single rim is all the decoration it
-    gets (that rim is baked with the plate, not drawn here).
+    The card is cut at four times the panel size and scaled down, so the corner
+    curve is smooth at panel resolution; the rim is drawn over it per frame, so
+    the art needs no baked border of its own.
     """
-    n = VINYL_ART_R * 2
+    nw, nh = VINYL_W, VINYL_H
     if im is not None:
-        art = ImageOps.fit(im, (n, n), Image.LANCZOS).convert("RGBA")
+        art = ImageOps.fit(im, (nw, nh), Image.LANCZOS).convert("RGBA")
     else:
-        art = Image.new("RGB", (n, n), mix(theme, (10, 12, 16), 0.28))
+        art = Image.new("RGB", (nw, nh), mix(theme, (10, 12, 16), 0.28))
         ad = ImageDraw.Draw(art)
         ink = mix(theme, (255, 255, 255), 0.40)
         try:
-            ad.text((n // 2, n // 2), "♪", font=F(26, "bold"), fill=ink,
+            ad.text((nw // 2, nh // 2), "♪", font=F(26, "bold"), fill=ink,
                     anchor="mm")
         except Exception:
             pass
         art = art.convert("RGBA")
-    mask = Image.new("L", (n * 4, n * 4), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, n * 4 - 1, n * 4 - 1), fill=255)
-    art.putalpha(mask.resize((n, n), Image.LANCZOS))
-    # a touch of the disc shows through the sleeve, which is what keeps the
-    # scene reading as an underlay instead of a photo pasted over the panel
-    art.putalpha(art.getchannel("A").point(_alpha_lut(214)))
+    mask = Image.new("L", (nw * 4, nh * 4), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, nw * 4 - 1, nh * 4 - 1), radius=VINYL_RADIUS * 4, fill=255)
+    art.putalpha(mask.resize((nw, nh), Image.LANCZOS))
+    # a fixed card is a solid object on the scene: the backdrop meter must not
+    # read through it, so only a whisker of the wash is let through
+    art.putalpha(art.getchannel("A").point(_alpha_lut(246)))
     return art
 
 
@@ -1108,7 +1110,6 @@ class Dashboard:
         self._cover_img = None
         self._theme_rgb = None
         self._label = None
-        self._label_rot = (None, None)       # (angle, rotated label)
         self._faces = {}                     # (face name, size) -> font
         self._rows = {}                      # cached lyric row tiles
         self._vinyl_bg_layer = None          # scratch layer for the backdrop meter
@@ -1266,7 +1267,6 @@ class Dashboard:
             self._theme_rgb = (_cover_theme(self._cover_img)
                                or _hue_theme(song))
             self._label = _label_art(self._cover_img, self._theme_rgb)
-            self._label_rot = (None, None)
         # the reveal length travels with the line (LyricState computes it from the
         # glyph count); the non-lyric paths simply carry no key, so the default
         # stands in. The face is re-picked every frame -- cached, so it is free.
@@ -1469,9 +1469,9 @@ class Dashboard:
             d.text((x + 2, SPEC_TICK_Y), label, font=self._f_tick, fill=TEXT_DIM)
 
     def _vinyl_static(self, img, back, c):
-        """Bake the record scene's resting parts: sleeve tint and disc seat.
+        """Bake the scene's resting parts: sleeve tint, card seat and shadow.
 
-        The disc itself is only a dark seat and a drop shadow now -- the sleeve
+        The card itself is only a dark seat and a drop shadow now -- the sleeve
         covers it, and the single rim that frames it is drawn with the sleeve so
         it always sits on top of the art.
         """
@@ -1489,12 +1489,15 @@ class Dashboard:
                   .convert("RGB"), (0, 0))
 
         d = ImageDraw.Draw(img, "RGBA")
-        cx, cy, R = VINYL_CX, VINYL_CY, VINYL_R
-        # a soft drop shadow, so the record sits on the sleeve, not on top of it
+        x0, y0 = VINYL_X0, VINYL_Y0
+        x1, y1 = x0 + VINYL_W - 1, y0 + VINYL_H - 1
+        # a soft drop shadow, so the card sits on the scene, not on top of it
         for k in (8, 5, 2):
-            d.ellipse((cx - R - k, cy - R - k + 3, cx + R + k, cy + R + k + 3),
-                      outline=(0, 0, 0, 26))
-        d.ellipse((cx - R, cy - R, cx + R, cy + R), fill=(9, 10, 13, 168))
+            d.rounded_rectangle((x0 - k, y0 - k + 3, x1 + k, y1 + k + 3),
+                                radius=VINYL_RADIUS + k,
+                                outline=(0, 0, 0, 26))
+        d.rounded_rectangle((x0 - 2, y0 - 2, x1 + 2, y1 + 2),
+                            radius=VINYL_RADIUS + 2, fill=(9, 10, 13, 168))
 
     def _chrome_led(self, img, d):
         """The unlit cells, which are the LED face's texture; baked, they are free."""
@@ -1681,22 +1684,16 @@ class Dashboard:
         img.paste(lay, (0, 0), lay)
 
     def _vinyl_label(self, img, d):
-        """The sleeve, spinning at a constant rate inside the disc's rim."""
+        """The sleeve, fixed on the left: one paste, no rotation."""
         if self._label is None:
             return
-        angle = (self.time * VINYL_SPIN) % 360.0
-        # half-degree buckets: the rotation is rebuilt only when it has moved
-        # enough to show, so most frames reuse the last paste
-        q = round(angle * 2.0) / 2.0
-        if self._label_rot[0] != q:
-            self._label_rot = (q, self._label.rotate(-q, resample=Image.BILINEAR))
-        rot = self._label_rot[1]
-        img.paste(rot, (VINYL_CX - VINYL_ART_R, VINYL_CY - VINYL_ART_R), rot)
-        # the sleeve's only decoration: one black rim, drawn after the art so
-        # it stays crisp no matter which way the cover is turned
-        d.ellipse((VINYL_CX - VINYL_R, VINYL_CY - VINYL_R,
-                   VINYL_CX + VINYL_R, VINYL_CY + VINYL_R),
-                  outline=(6, 7, 10, 235), width=2)
+        img.paste(self._label, (VINYL_X0, VINYL_Y0), self._label)
+        # the card's only decoration: one black rim, drawn after the art so it
+        # stays crisp over the corners
+        d.rounded_rectangle((VINYL_X0 - 2, VINYL_Y0 - 2,
+                             VINYL_X0 + VINYL_W + 1, VINYL_Y0 + VINYL_H + 1),
+                            radius=VINYL_RADIUS + 2,
+                            outline=(6, 7, 10, 235), width=2)
 
     def _vinyl_face(self, size):
         """The lyric face at ``size``, cached per face name and size."""
